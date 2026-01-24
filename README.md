@@ -1,4 +1,4 @@
-# Binary JSON (BJson)
+# Binary JSON (binjson)
 
 A compact binary encoding format for JSON data with support for Origin Private File System (OPFS) in browsers. This library enables efficient storage and retrieval of JSON data in a binary format, with support for MongoDB ObjectIds.
 
@@ -37,7 +37,7 @@ The library uses the following byte values for encoding JSON types:
 ### Node.js
 
 ```bash
-npm install bjson
+npm install binjson
 ```
 
 ### Browser
@@ -45,7 +45,7 @@ npm install bjson
 Include the script in your HTML:
 
 ```html
-<script src="bjson.js"></script>
+<script src="binjson.js"></script>
 ```
 
 ## Usage
@@ -53,7 +53,7 @@ Include the script in your HTML:
 ### Basic Encoding and Decoding
 
 ```javascript
-const { encode, decode } = require('./bjson.js');
+const { encode, decode } = require('./binjson.js');
 
 // Encode data to binary
 const data = { name: 'John', age: 30, active: true };
@@ -67,7 +67,7 @@ console.log(decoded); // { name: 'John', age: 30, active: true }
 ### Using MongoDB ObjectId
 
 ```javascript
-const { ObjectId, encode, decode } = require('./bjson.js');
+const { ObjectId, encode, decode } = require('./binjson.js');
 
 const data = {
   _id: new ObjectId('507f1f77bcf86cd799439011'),
@@ -83,7 +83,7 @@ console.log(decoded._id.toString()); // '507f1f77bcf86cd799439011'
 ### Using Date Objects
 
 ```javascript
-const { encode, decode } = require('./bjson.js');
+const { encode, decode } = require('./binjson.js');
 
 const data = {
   timestamp: new Date('2023-01-15T12:30:45Z'),
@@ -100,7 +100,7 @@ console.log(decoded.message); // 'Hello'
 ### Using Binary Data (Uint8Array)
 
 ```javascript
-const { encode, decode } = require('./bjson.js');
+const { encode, decode } = require('./binjson.js');
 
 // Encode binary data
 const binaryData = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
@@ -125,7 +125,7 @@ console.log(binaryDecoded.content); // Uint8Array [0x89, 0x50, 0x4E, 0x47]
 ### Using Pointer for File Offsets
 
 ```javascript
-const { Pointer, encode, decode } = require('./bjson.js');
+const { Pointer, encode, decode } = require('./binjson.js');
 
 // Create an index record with a pointer to data at offset 2048
 const indexRecord = {
@@ -159,7 +159,7 @@ See [FILE-MODE-API.md](FILE-MODE-API.md) for detailed documentation.
 // In a Web Worker:
 const { BJsonFile } = self.BJson;
 
-const file = new BJsonFile('data.bjson');
+const file = new BJsonFile('data.bj');
 await file.open('rw');  // Open in read-write mode
 
 const data = { name: 'John', age: 30 };
@@ -172,7 +172,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bjson');
+const file = new BJsonFile('data.bj');
 await file.open('r');  // Open in read-only mode
 
 const data = await file.read();
@@ -185,7 +185,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bjson');
+const file = new BJsonFile('data.bj');
 await file.open('rw');  // Open in read-write mode
 
 // Write initial record
@@ -202,7 +202,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bjson');
+const file = new BJsonFile('data.bj');
 await file.open('r');  // Open in read-only mode
 
 for (const record of file.scan()) {
@@ -220,7 +220,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bjson');
+const file = new BJsonFile('data.bj');
 
 // Check if file exists (doesn't require opening)
 const exists = await file.exists();
@@ -244,7 +244,7 @@ A single `FileSystemSyncAccessHandle` is used for all operations once opened, ma
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bjson');
+const file = new BJsonFile('data.bj');
 await file.open('rw');  // Opens once with a single sync access handle
 
 // Multiple operations on the same handle - no need to reopen!
@@ -385,7 +385,7 @@ new BJsonFile(filename)
 ### Complex Data Structure
 
 ```javascript
-const { ObjectId, encode, decode } = require('./bjson.js');
+const { ObjectId, encode, decode } = require('./binjson.js');
 
 const document = {
   _id: new ObjectId('507f1f77bcf86cd799439011'),
@@ -417,7 +417,7 @@ console.log(decoded);
 ### Batch File Operations
 
 ```javascript
-const file = new BJsonFile('products.bjson');
+const file = new BJsonFile('products.bj');
 await file.open('rw');  // Open once for multiple operations
 
 // Write multiple products
@@ -449,7 +449,7 @@ await file.close();
 ### Using Pointers for File Seeking
 
 ```javascript
-const { Pointer, encode, decode } = require('./bjson.js');
+const { Pointer, encode, decode } = require('./binjson.js');
 const fs = require('fs');
 
 // Scenario: Build an index of records with pointers to actual data locations
@@ -461,8 +461,8 @@ const records = [
   { id: 3, name: 'Charlie', email: 'charlie@example.com' }
 ];
 
-const dataFile = 'data.bjson';
-const indexFile = 'index.bjson';
+const dataFile = 'data.bj';
+const indexFile = 'index.bj';
 const index = [];
 
 // Write records and build index
@@ -534,7 +534,7 @@ This creates `dist/worker.js` which bundles all necessary dependencies.
 3. Open http://localhost:8080/public/ in your browser (Chrome 102+ or Edge 102+ required for OPFS support)
 
 Available demos:
-- **bjson.html**: Basic encoding, file operations (write, read, append, scan, delete)
+- **binjson.html**: Basic encoding, file operations (write, read, append, scan, delete)
 - **bplustree-compact.html**: B+ tree index with compaction
 - **rtree-compact.html**: R-tree spatial index with geographic queries
 - **textindex-compact.html**: Full-text search index with BM25 ranking

@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, beforeAll } from 'vitest';
 import { execFile } from 'child_process';
 import { RTree } from '../src/rtree.js';
-import { deleteFile, getFileHandle, ObjectId } from '../src/bjson.js';
+import { deleteFile, getFileHandle, ObjectId } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;
@@ -34,7 +34,7 @@ if (hasOPFS) {
 let testFileCounter = 0;
 
 function getTestFilename() {
-  return `test-rtree-decode-${Date.now()}-${testFileCounter++}.bjson`;
+  return `test-rtree-decode-${Date.now()}-${testFileCounter++}.bj`;
 }
 
 async function createTestTree(order = 4) {

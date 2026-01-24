@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, expect, beforeAll } from 'vitest';
 import { TextIndex } from '../src/textindex.js';
 import { BPlusTree } from '../src/bplustree.js';
-import { deleteFile, getFileHandle } from '../src/bjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 
 let hasOPFS = false;
 try {
@@ -40,9 +40,9 @@ describe.skipIf(!hasOPFS)('TextIndex', function() {
 
   async function cleanupFiles(name) {
     const files = [
-      `${name}-terms.bjson`,
-      `${name}-documents.bjson`,
-      `${name}-lengths.bjson`
+      `${name}-terms.bj`,
+      `${name}-documents.bj`,
+      `${name}-lengths.bj`
     ];
 
     for (const file of files) {
@@ -56,15 +56,15 @@ describe.skipIf(!hasOPFS)('TextIndex', function() {
     baseName = `text-index-${Date.now()}-${counter++}`;
     
     // Create three trees with sync handles
-    const indexHandle = await getFileHandle(rootDirHandle, `${baseName}-terms.bjson`, { create: true });
+    const indexHandle = await getFileHandle(rootDirHandle, `${baseName}-terms.bj`, { create: true });
     const indexSyncHandle = await indexHandle.createSyncAccessHandle();
     const indexTree = new BPlusTree(indexSyncHandle, 16, rootDirHandle);
     
-    const docTermsHandle = await getFileHandle(rootDirHandle, `${baseName}-documents.bjson`, { create: true });
+    const docTermsHandle = await getFileHandle(rootDirHandle, `${baseName}-documents.bj`, { create: true });
     const docTermsSyncHandle = await docTermsHandle.createSyncAccessHandle();
     const docTermsTree = new BPlusTree(docTermsSyncHandle, 16, rootDirHandle);
     
-    const lengthsHandle = await getFileHandle(rootDirHandle, `${baseName}-lengths.bjson`, { create: true });
+    const lengthsHandle = await getFileHandle(rootDirHandle, `${baseName}-lengths.bj`, { create: true });
     const lengthsSyncHandle = await lengthsHandle.createSyncAccessHandle();
     const lengthsTree = new BPlusTree(lengthsSyncHandle, 16, rootDirHandle);
     

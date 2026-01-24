@@ -1,5 +1,5 @@
 import { BPlusTree } from '../src/bplustree.js';
-import { BJsonFile } from '../src/bjson.js';
+import { BJsonFile } from '../src/binjson.js';
 
 // Provide OPFS in Node using node-opfs (installed as devDependency)
 const nodeOpfs = await import('node-opfs');
@@ -9,7 +9,7 @@ Object.defineProperty(global, 'navigator', {
   configurable: true
 });
 
-// Helper to clean up a bjson file if it exists
+// Helper to clean up a binjson file if it exists
 async function cleanup(filename) {
   const file = new BJsonFile(filename);
   if (await file.exists()) {
@@ -20,8 +20,8 @@ async function cleanup(filename) {
 
 // Simple demo runner
 async function main() {
-  const filename = 'demo-bplustree.bjson';
-  const compactedFilename = 'demo-bplustree-compacted.bjson';
+  const filename = 'demo-bplustree.bj';
+  const compactedFilename = 'demo-bplustree-compacted.bj';
 
   await cleanup(filename);
   await cleanup(compactedFilename);

@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, expect, beforeAll } from 'vitest';
 import { TextIndex } from '../src/textindex.js';
 import { BPlusTree } from '../src/bplustree.js';
-import { deleteFile, getFileHandle } from '../src/bjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 
 let hasOPFS = false;
 try {
@@ -36,9 +36,9 @@ describe.skipIf(!hasOPFS)('TextIndex compaction', function() {
   async function cleanupFiles(name) {
     if (!name) return;
     const files = [
-      `${name}-terms.bjson`,
-      `${name}-documents.bjson`,
-      `${name}-lengths.bjson`
+      `${name}-terms.bj`,
+      `${name}-documents.bj`,
+      `${name}-lengths.bj`
     ];
 
     for (const file of files) {
@@ -52,15 +52,15 @@ describe.skipIf(!hasOPFS)('TextIndex compaction', function() {
     baseName = `text-index-${Date.now()}-${counter++}`;
     
     // Create three trees with sync handles
-    const indexHandle = await getFileHandle(rootDirHandle, `${baseName}-terms.bjson`, { create: true });
+    const indexHandle = await getFileHandle(rootDirHandle, `${baseName}-terms.bj`, { create: true });
     const indexSyncHandle = await indexHandle.createSyncAccessHandle();
     const indexTree = new BPlusTree(indexSyncHandle, 16, rootDirHandle);
     
-    const docTermsHandle = await getFileHandle(rootDirHandle, `${baseName}-documents.bjson`, { create: true });
+    const docTermsHandle = await getFileHandle(rootDirHandle, `${baseName}-documents.bj`, { create: true });
     const docTermsSyncHandle = await docTermsHandle.createSyncAccessHandle();
     const docTermsTree = new BPlusTree(docTermsSyncHandle, 16, rootDirHandle);
     
-    const lengthsHandle = await getFileHandle(rootDirHandle, `${baseName}-lengths.bjson`, { create: true });
+    const lengthsHandle = await getFileHandle(rootDirHandle, `${baseName}-lengths.bj`, { create: true });
     const lengthsSyncHandle = await lengthsHandle.createSyncAccessHandle();
     const lengthsTree = new BPlusTree(lengthsSyncHandle, 16, rootDirHandle);
     
@@ -102,15 +102,15 @@ describe.skipIf(!hasOPFS)('TextIndex compaction', function() {
     compactBase = `${baseName}-compact`;
     
     // Create destination trees for compaction (unopened, with fresh sync handles)
-    const indexHandle = await getFileHandle(rootDirHandle, `${compactBase}-terms.bjson`, { create: true });
+    const indexHandle = await getFileHandle(rootDirHandle, `${compactBase}-terms.bj`, { create: true });
     const indexSyncHandle = await indexHandle.createSyncAccessHandle();
     const destIndexTree = new BPlusTree(indexSyncHandle, 16);
     
-    const docTermsHandle = await getFileHandle(rootDirHandle, `${compactBase}-documents.bjson`, { create: true });
+    const docTermsHandle = await getFileHandle(rootDirHandle, `${compactBase}-documents.bj`, { create: true });
     const docTermsSyncHandle = await docTermsHandle.createSyncAccessHandle();
     const destDocTermsTree = new BPlusTree(docTermsSyncHandle, 16);
     
-    const lengthsHandle = await getFileHandle(rootDirHandle, `${compactBase}-lengths.bjson`, { create: true });
+    const lengthsHandle = await getFileHandle(rootDirHandle, `${compactBase}-lengths.bj`, { create: true });
     const lengthsSyncHandle = await lengthsHandle.createSyncAccessHandle();
     const destLengthsTree = new BPlusTree(lengthsSyncHandle, 16);
     
@@ -127,15 +127,15 @@ describe.skipIf(!hasOPFS)('TextIndex compaction', function() {
     expect(result.lengths.oldSize).toBeGreaterThan(0);
 
     // Compaction closes the index, so we need to reopen with the compacted data
-    const indexHandle2 = await getFileHandle(rootDirHandle, `${compactBase}-terms.bjson`, { create: false });
+    const indexHandle2 = await getFileHandle(rootDirHandle, `${compactBase}-terms.bj`, { create: false });
     const indexSyncHandle2 = await indexHandle2.createSyncAccessHandle();
     const compactedIndex = new BPlusTree(indexSyncHandle2, 16);
     
-    const docTermsHandle2 = await getFileHandle(rootDirHandle, `${compactBase}-documents.bjson`, { create: false });
+    const docTermsHandle2 = await getFileHandle(rootDirHandle, `${compactBase}-documents.bj`, { create: false });
     const docTermsSyncHandle2 = await docTermsHandle2.createSyncAccessHandle();
     const compactedDocTerms = new BPlusTree(docTermsSyncHandle2, 16);
     
-    const lengthsHandle2 = await getFileHandle(rootDirHandle, `${compactBase}-lengths.bjson`, { create: false });
+    const lengthsHandle2 = await getFileHandle(rootDirHandle, `${compactBase}-lengths.bj`, { create: false });
     const lengthsSyncHandle2 = await lengthsHandle2.createSyncAccessHandle();
     const compactedLengths = new BPlusTree(lengthsSyncHandle2, 16);
     

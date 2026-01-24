@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFile } from 'child_process';
 import { BPlusTree } from '../src/bplustree.js';
-import { ObjectId, Pointer, deleteFile, getFileHandle } from '../src/bjson.js';
+import { ObjectId, Pointer, deleteFile, getFileHandle } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;
@@ -33,7 +33,7 @@ if (hasOPFS) {
 }
 
 function getTestFilename() {
-  return `test-bplustree-decode-${Date.now()}-${testFileCounter++}.bjson`;
+  return `test-bplustree-decode-${Date.now()}-${testFileCounter++}.bj`;
 }
 
 async function createTestTree(order = 3) {

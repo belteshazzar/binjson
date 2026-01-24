@@ -18,7 +18,7 @@ try {
 }
 
 function usage() {
-  console.error('Usage: rtree-compact <source.bjson> <destination.bjson>');
+  console.error('Usage: rtree-compact <source.bj> <destination.bj>');
   console.error('');
   console.error('Compacts an R-tree file by copying only the latest version of nodes');
   console.error('to a new file, removing obsolete node versions and reclaiming space.');

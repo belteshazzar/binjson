@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { execFile } from 'child_process';
-import { encode, ObjectId, Pointer } from '../src/bjson.js';
+import { encode, ObjectId, Pointer } from '../src/binjson.js';
 
 function concatBuffers(buffers) {
   const total = buffers.reduce((sum, b) => sum + b.length, 0);
@@ -18,7 +18,7 @@ function concatBuffers(buffers) {
 
 function runCli(filePath) {
   return new Promise((resolve, reject) => {
-    execFile('node', ['bin/bjson-decode.js', filePath], { cwd: process.cwd() }, (error, stdout, stderr) => {
+    execFile('node', ['bin/binjson-decode.js', filePath], { cwd: process.cwd() }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout;
         error.stderr = stderr;
@@ -30,10 +30,10 @@ function runCli(filePath) {
   });
 }
 
-describe('bjson-decode CLI', () => {
+describe('binjson-decode CLI', () => {
   it('decodes Pointer, ObjectId, and Date with readable formatting', async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), 'bjson-decode-'));
-    const filePath = join(tempDir, 'sample.bjson');
+    const tempDir = await mkdtemp(join(tmpdir(), 'binjson-decode-'));
+    const filePath = join(tempDir, 'sample.bj');
 
     const oid1 = new ObjectId('5f1d7f3a0b0c0d0e0f101112');
     const oid2 = new ObjectId('6a6b6c6d6e6f707172737475');

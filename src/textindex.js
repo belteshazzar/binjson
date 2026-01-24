@@ -1,6 +1,6 @@
 import { stemmer } from 'stemmer';
 import { BPlusTree } from './bplustree.js';
-import { getFileHandle } from './bjson.js';
+import { getFileHandle } from './binjson.js';
 
 // Common English stop words that don't add semantic value to searches
 const STOPWORDS = new Set([

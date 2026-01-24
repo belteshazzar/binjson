@@ -1,8 +1,8 @@
 /**
- * Test suite for bjson encoder/decoder
+ * Test suite for binjson encoder/decoder
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
-import { TYPE, ObjectId, Pointer, encode, decode, BJsonFile, deleteFile, getFileHandle } from '../src/bjson.js';
+import { TYPE, ObjectId, Pointer, encode, decode, BJsonFile, deleteFile, getFileHandle } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;
@@ -442,7 +442,7 @@ describe('Binary JSON Encoder/Decoder', () => {
 });
 
 describe.skipIf(!hasOPFS)('BJsonFile', () => {
-  const testFiles = ['test-bjsonfile.bjson', 'test-bjsonfile2.bjson'];
+  const testFiles = ['test-binjsonfile.bj', 'test-binjsonfile2.bj'];
 
   afterEach(async () => {
     // Clean up test files
@@ -454,7 +454,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   });
 
   it('should write and read file', async () => {
-    const fileHandle = await getFileHandle(rootDirHandle, 'test-bjsonfile.bjson', { create: true });
+    const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
     const file = new BJsonFile(syncHandle);
 
@@ -486,7 +486,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   });
 
   it('should check file existence', async () => {
-    const fileHandle = await getFileHandle(rootDirHandle, 'test-bjsonfile.bjson', { create: true });
+    const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
     const file = new BJsonFile(syncHandle);
     
@@ -496,7 +496,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
     expect(fileHandle).toBeDefined();
 
     try {
-      await getFileHandle(rootDirHandle, 'nonexistent.bjson');
+      await getFileHandle(rootDirHandle, 'nonexistent.bj');
       expect(true).toBe(false); // Should not reach here
     } catch (error) {
       expect(error.name).toBe('NotFoundError');
@@ -506,7 +506,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   });
 
   it('should append and scan records', async () => {
-    const fileHandle = await getFileHandle(rootDirHandle, 'test-bjsonfile2.bjson', { create: true });
+    const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile2.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
     const file = new BJsonFile(syncHandle);
     
@@ -532,7 +532,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   });
 
   it('should delete file', async () => {
-    const fileHandle = await getFileHandle(rootDirHandle, 'test-bjsonfile.bjson', { create: true });
+    const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
     const file = new BJsonFile(syncHandle);
     
@@ -540,11 +540,11 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
     file.flush();
     
     await syncHandle.close();
-    await deleteFile(rootDirHandle, 'test-bjsonfile.bjson');
+    await deleteFile(rootDirHandle, 'test-binjsonfile.bj');
 
     // Verify file is deleted
     try {
-      await getFileHandle(rootDirHandle, 'test-bjsonfile.bjson');
+      await getFileHandle(rootDirHandle, 'test-binjsonfile.bj');
       expect(true).toBe(false); // Should not reach here
     } catch (error) {
       expect(error.name).toBe('NotFoundError');

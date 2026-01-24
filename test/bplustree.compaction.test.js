@@ -1,6 +1,6 @@
 import { expect, describe, it, beforeEach, afterEach, beforeAll } from 'vitest';
 import { BPlusTree } from '../src/bplustree.js';
-import { deleteFile, getFileHandle } from '../src/bjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;
@@ -31,7 +31,7 @@ describe.skipIf(!hasOPFS)('BPlusTree Compaction', function() {
   });
 
   function getTestFilename() {
-    return `test-bplustree-${Date.now()}-${testFileCounter++}.bjson`;
+    return `test-bplustree-${Date.now()}-${testFileCounter++}.bj`;
   }
 
   async function createTestTree(order = 3) {

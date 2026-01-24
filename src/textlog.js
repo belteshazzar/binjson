@@ -16,7 +16,7 @@
  * - Final record: Metadata {version, snapshotPointer, latestPointer, diffCount, diffsPerSnapshot}
  */
 
-import { BJsonFile, Pointer } from './bjson.js';
+import { BJsonFile, Pointer } from './binjson.js';
 import { createPatch, applyPatch, structuredPatch } from 'diff';
 import { createHash } from 'crypto';
 

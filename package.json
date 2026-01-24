@@ -1,18 +1,18 @@
 {
-  "name": "bjson",
-  "version": "1.0.1",
+  "name": "@belteshazzar/binjson",
+  "version": "1.0.0",
   "description": "A compact binary encoding format for JSON data with support for Origin Private File System (OPFS) in browsers",
-  "main": "src/bjson.js",
+  "main": "src/binjson.js",
   "type": "module",
   "exports": {
-    ".": "./src/bjson.js",
+    ".": "./src/binjson.js",
     "./bplustree": "./src/bplustree.js",
     "./rtree": "./src/rtree.js",
     "./textindex": "./src/textindex.js",
     "./textlog": "./src/textlog.js"
   },
   "bin": {
-    "bjson-decode": "bin/bjson-decode.js"
+    "binjson-decode": "bin/binjson-decode.js"
   },
   "scripts": {
     "test": "vitest run",

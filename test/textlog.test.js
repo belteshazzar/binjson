@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, beforeAll } from 'vitest';
 import { TextLog, ENTRY_TYPE } from '../src/textlog.js';
-import { deleteFile, getFileHandle } from '../src/bjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;
@@ -37,7 +37,7 @@ describe.skipIf(!hasOPFS)('TextLog', function() {
   });
 
   function getTestFilename() {
-    return `test-textlog-${Date.now()}-${testFileCounter++}.bjson`;
+    return `test-textlog-${Date.now()}-${testFileCounter++}.bj`;
   }
 
   async function createTestLog(diffsPerSnapshot = 10) {

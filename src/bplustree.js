@@ -2,13 +2,13 @@
  * BPlusTree - Persistent immutable B+ tree with BJsonFile storage
  * 
  * Usage pattern:
- *   const tree = new BPlusTree('tree.bjson');
+ *   const tree = new BPlusTree('tree.bj');
  *   await tree.open();
  *   await tree.add(key, value);
  *   await tree.close();
  */
 
-import { BJsonFile, Pointer, getFileHandle, deleteFile } from './bjson.js';
+import { BJsonFile, Pointer, getFileHandle, deleteFile } from './binjson.js';
 
 /**
  * Node for persistent storage

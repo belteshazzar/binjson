@@ -59,9 +59,9 @@
     async function cleanupBase(baseName) {
       const root = await navigator.storage.getDirectory();
       const files = [
-        `${baseName}-terms.bjson`,
-        `${baseName}-documents.bjson`,
-        `${baseName}-lengths.bjson`
+        `${baseName}-terms.bj`,
+        `${baseName}-documents.bj`,
+        `${baseName}-lengths.bj`
       ];
 
       for (const file of files) {
@@ -131,9 +131,9 @@
         
         // Show file sizes before compaction
         log('\nFile sizes before compaction:');
-        const termsSize = await getFileSize(`${baseName}-terms.bjson`);
-        const docsSize = await getFileSize(`${baseName}-documents.bjson`);
-        const lengthsSize = await getFileSize(`${baseName}-lengths.bjson`);
+        const termsSize = await getFileSize(`${baseName}-terms.bj`);
+        const docsSize = await getFileSize(`${baseName}-documents.bj`);
+        const lengthsSize = await getFileSize(`${baseName}-lengths.bj`);
         const totalBefore = termsSize + docsSize + lengthsSize;
         log(`  terms: ${termsSize} bytes`);
         log(`  documents: ${docsSize} bytes`);
@@ -147,9 +147,9 @@
         
         // Show file sizes after compaction
         log('\nFile sizes after compaction:');
-        const compactTermsSize = await getFileSize(`${compactBase}-terms.bjson`);
-        const compactDocsSize = await getFileSize(`${compactBase}-documents.bjson`);
-        const compactLengthsSize = await getFileSize(`${compactBase}-lengths.bjson`);
+        const compactTermsSize = await getFileSize(`${compactBase}-terms.bj`);
+        const compactDocsSize = await getFileSize(`${compactBase}-documents.bj`);
+        const compactLengthsSize = await getFileSize(`${compactBase}-lengths.bj`);
         const totalAfter = compactTermsSize + compactDocsSize + compactLengthsSize;
         log(`  terms: ${compactTermsSize} bytes`);
         log(`  documents: ${compactDocsSize} bytes`);

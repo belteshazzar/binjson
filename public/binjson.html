@@ -121,7 +121,7 @@
     
     <div>
       <label for="filename">Filename:</label>
-      <input type="text" id="filename" value="test.bjson" placeholder="Enter filename">
+      <input type="text" id="filename" value="test.bj" placeholder="Enter filename">
     </div>
 
     <div>
@@ -211,7 +211,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
   <script type="module">
 
-    import { ObjectId, Pointer, encode, decode } from '/src/bjson.js';
+    import { ObjectId, Pointer, encode, decode } from '/src/binjson.js';
     let currentBinary = null;
     
     // Initialize web worker for file operations
@@ -346,7 +346,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
     async function writeFile() {
       try {
-        const filename = document.getElementById('filename').value || 'demo.bjson';
+        const filename = document.getElementById('filename').value || 'demo.bj';
         const jsonInput = document.getElementById('jsonInput').value;
         const data = parseExtendedJSON(jsonInput);
         const binary = encode(data);
@@ -364,7 +364,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
     async function readFile() {
       try {
-        const filename = document.getElementById('filename').value || 'demo.bjson';
+        const filename = document.getElementById('filename').value || 'demo.bj';
         const data = await callWorker('read', filename);
         
         showMessage('message', `Successfully read data from ${filename}`);
@@ -379,7 +379,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
     async function appendToFile() {
       try {
-        const filename = document.getElementById('filename').value || 'demo.bjson';
+        const filename = document.getElementById('filename').value || 'demo.bj';
         const jsonInput = document.getElementById('jsonInput').value;
         const data = parseExtendedJSON(jsonInput);
         const binary = encode(data);
@@ -397,7 +397,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
     async function scanFile() {
       try {
-        const filename = document.getElementById('filename').value || 'demo.bjson';
+        const filename = document.getElementById('filename').value || 'demo.bj';
         const records = await callWorker('scan', filename);
         
         showMessage('message', `Successfully scanned ${records.length} record(s) from ${filename}`);
@@ -412,7 +412,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
     async function deleteFile() {
       try {
-        const filename = document.getElementById('filename').value || 'demo.bjson';
+        const filename = document.getElementById('filename').value || 'demo.bj';
         await callWorker('delete', filename);
         
         showMessage('message', `Successfully deleted ${filename}`);
@@ -427,7 +427,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
     async function checkFileExists() {
       try {
-        const filename = document.getElementById('filename').value || 'demo.bjson';
+        const filename = document.getElementById('filename').value || 'demo.bj';
         const exists = await callWorker('exists', filename);
         
         showMessage('message', `File ${filename} ${exists ? 'exists' : 'does not exist'}`);

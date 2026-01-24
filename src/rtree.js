@@ -1,8 +1,8 @@
 /**
  * On-Disk R-tree implementation using BJsonFile
  * 
- * This implementation stores all data in an append-only bjson file:
- * - Nodes are stored as bjson records
+ * This implementation stores all data in an append-only binjson file:
+ * - Nodes are stored as binjson records
  * - Node references use Pointer objects for file offsets
  * - Updates append new versions rather than modifying in place
  * - An in-memory index tracks the latest offset for each node ID
@@ -14,7 +14,7 @@
  *   - For leaf nodes: children are data entries with {bbox, lat, lng, data}
  */
 
-import { BJsonFile, Pointer, ObjectId, getFileHandle, deleteFile } from './bjson.js';
+import { BJsonFile, Pointer, ObjectId, getFileHandle, deleteFile } from './binjson.js';
 
 /**
  * Calculate distance between two points using Haversine formula

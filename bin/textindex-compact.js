@@ -1,5 +1,5 @@
 import { TextIndex } from '../src/textindex.js';
-import { BJsonFile } from '../src/bjson.js';
+import { BJsonFile } from '../src/binjson.js';
 
 // Provide OPFS in Node using node-opfs (installed as devDependency)
 const nodeOpfs = await import('node-opfs');
@@ -11,9 +11,9 @@ Object.defineProperty(global, 'navigator', {
 
 async function cleanupBase(name) {
   const files = [
-    `${name}-terms.bjson`,
-    `${name}-documents.bjson`,
-    `${name}-lengths.bjson`
+    `${name}-terms.bj`,
+    `${name}-documents.bj`,
+    `${name}-lengths.bj`
   ];
 
   for (const file of files) {

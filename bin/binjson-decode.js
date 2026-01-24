@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { readFile } from 'fs/promises';
-import { decode, TYPE, ObjectId, Pointer } from '../src/bjson.js';
+import { decode, TYPE, ObjectId, Pointer } from '../src/binjson.js';
 
 function usage() {
-  console.error('Usage: bjson-decode <file.bjson>');
+  console.error('Usage: binjson-decode <file.bj>');
   process.exit(1);
 }
 

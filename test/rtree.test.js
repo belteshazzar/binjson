@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { RTree } from '../src/rtree.js';
-import { ObjectId, deleteFile, getFileHandle } from '../src/bjson.js';
+import { ObjectId, deleteFile, getFileHandle } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;
@@ -40,7 +40,7 @@ if (hasOPFS) {
 let testFileCounter = 0;
 
 function getTestFilename() {
-  return `test-rtree-${Date.now()}-${testFileCounter++}.bjson`;
+  return `test-rtree-${Date.now()}-${testFileCounter++}.bj`;
 }
 
 async function createTestTree(order = 4) {

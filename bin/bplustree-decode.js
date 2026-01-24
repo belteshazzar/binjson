@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { BPlusTree } from '../src/bplustree.js';
-import { ObjectId, Pointer, getFileHandle } from '../src/bjson.js';
+import { ObjectId, Pointer, getFileHandle } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 try {
@@ -19,7 +19,7 @@ try {
 }
 
 function usage() {
-  console.error('Usage: bplustree-decode <file.bjson>');
+  console.error('Usage: bplustree-decode <file.bj>');
   process.exit(1);
 }
 

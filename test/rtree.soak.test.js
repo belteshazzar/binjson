@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, afterEach, beforeAll } from 'vitest';
 import { RTree } from '../src/rtree.js';
-import { deleteFile, getFileHandle, ObjectId } from '../src/bjson.js';
+import { deleteFile, getFileHandle, ObjectId } from '../src/binjson.js';
 
 // Detect if running in browser
 const isBrowser = typeof navigator !== 'undefined' && typeof process === 'undefined';
@@ -42,7 +42,7 @@ if (hasOPFS) {
 
 async function cleanup() {
     if (rootDirHandle) {
-      await deleteFile(rootDirHandle, 'test-rtree-soak.bjson');
+      await deleteFile(rootDirHandle, 'test-rtree-soak.bj');
     }
 }
 
@@ -70,7 +70,7 @@ function generateLocationWithId(index) {
 }
 
 async function createSoakTestTree() {
-  const filename = 'test-rtree-soak.bjson';
+  const filename = 'test-rtree-soak.bj';
   const fileHandle = await getFileHandle(rootDirHandle, filename, { create: true });
   const syncHandle = await fileHandle.createSyncAccessHandle();
   const tree = new RTree(syncHandle, 4);

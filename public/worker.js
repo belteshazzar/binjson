@@ -1,7 +1,7 @@
 // Web Worker for handling OPFS file operations with sync access handles
 // This worker handles file operations that require FileSystemSyncAccessHandle
 
-import { encode, decode, getFileHandle, deleteFile, ObjectId } from '../src/bjson.js';
+import { encode, decode, getFileHandle, deleteFile, ObjectId } from '../src/binjson.js';
 import { BPlusTree } from '../src/bplustree.js';
 import { RTree } from '../src/rtree.js';
 import { TextIndex } from '../src/textindex.js';
@@ -279,13 +279,13 @@ self.addEventListener('message', async (event) => {
         const { baseName, order } = data;
         
         // Create three BPlusTree files for TextIndex
-        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bjson`, { create: true });
+        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bj`, { create: true });
         const indexHandle = await indexFile.createSyncAccessHandle();
         
-        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bjson`, { create: true });
+        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bj`, { create: true });
         const docTermsHandle = await docTermsFile.createSyncAccessHandle();
         
-        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bjson`, { create: true });
+        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bj`, { create: true });
         const docLengthsHandle = await docLengthsFile.createSyncAccessHandle();
         
         // Create three BPlusTree instances
@@ -310,15 +310,15 @@ self.addEventListener('message', async (event) => {
         const { baseName, docId, text } = data;
         
         // Open the three BPlusTree files
-        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bjson`, { create: false });
+        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bj`, { create: false });
         const indexHandle = await indexFile.createSyncAccessHandle();
         const indexTree = new BPlusTree(indexHandle);
         
-        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bjson`, { create: false });
+        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bj`, { create: false });
         const docTermsHandle = await docTermsFile.createSyncAccessHandle();
         const docTermsTree = new BPlusTree(docTermsHandle);
         
-        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bjson`, { create: false });
+        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bj`, { create: false });
         const docLengthsHandle = await docLengthsFile.createSyncAccessHandle();
         const docLengthsTree = new BPlusTree(docLengthsHandle);
         
@@ -344,15 +344,15 @@ self.addEventListener('message', async (event) => {
         const { baseName, queryText, options } = data;
         
         // Open the three BPlusTree files
-        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bjson`, { create: false });
+        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bj`, { create: false });
         const indexHandle = await indexFile.createSyncAccessHandle();
         const indexTree = new BPlusTree(indexHandle);
         
-        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bjson`, { create: false });
+        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bj`, { create: false });
         const docTermsHandle = await docTermsFile.createSyncAccessHandle();
         const docTermsTree = new BPlusTree(docTermsHandle);
         
-        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bjson`, { create: false });
+        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bj`, { create: false });
         const docLengthsHandle = await docLengthsFile.createSyncAccessHandle();
         const docLengthsTree = new BPlusTree(docLengthsHandle);
         
@@ -378,28 +378,28 @@ self.addEventListener('message', async (event) => {
         const { baseName, compactBaseName } = data;
         
         // Open source trees
-        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bjson`, { create: false });
+        const indexFile = await getFileHandle(dirHandle, `${baseName}-terms.bj`, { create: false });
         const indexHandle = await indexFile.createSyncAccessHandle();
         const indexTree = new BPlusTree(indexHandle);
         
-        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bjson`, { create: false });
+        const docTermsFile = await getFileHandle(dirHandle, `${baseName}-documents.bj`, { create: false });
         const docTermsHandle = await docTermsFile.createSyncAccessHandle();
         const docTermsTree = new BPlusTree(docTermsHandle);
         
-        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bjson`, { create: false });
+        const docLengthsFile = await getFileHandle(dirHandle, `${baseName}-lengths.bj`, { create: false });
         const docLengthsHandle = await docLengthsFile.createSyncAccessHandle();
         const docLengthsTree = new BPlusTree(docLengthsHandle);
         
         // Create destination BPlusTree instances
-        const compactIndexFile = await getFileHandle(dirHandle, `${compactBaseName}-terms.bjson`, { create: true });
+        const compactIndexFile = await getFileHandle(dirHandle, `${compactBaseName}-terms.bj`, { create: true });
         const compactIndexHandle = await compactIndexFile.createSyncAccessHandle();
         const compactIndexTree = new BPlusTree(compactIndexHandle);
         
-        const compactDocTermsFile = await getFileHandle(dirHandle, `${compactBaseName}-documents.bjson`, { create: true });
+        const compactDocTermsFile = await getFileHandle(dirHandle, `${compactBaseName}-documents.bj`, { create: true });
         const compactDocTermsHandle = await compactDocTermsFile.createSyncAccessHandle();
         const compactDocTermsTree = new BPlusTree(compactDocTermsHandle);
         
-        const compactDocLengthsFile = await getFileHandle(dirHandle, `${compactBaseName}-lengths.bjson`, { create: true });
+        const compactDocLengthsFile = await getFileHandle(dirHandle, `${compactBaseName}-lengths.bj`, { create: true });
         const compactDocLengthsHandle = await compactDocLengthsFile.createSyncAccessHandle();
         const compactDocLengthsTree = new BPlusTree(compactDocLengthsHandle);
         

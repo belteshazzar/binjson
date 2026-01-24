@@ -8,7 +8,7 @@
  */
 
 import { TextLog } from '../src/textlog.js';
-import { getFileHandle, deleteFile } from '../src/bjson.js';
+import { getFileHandle, deleteFile } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 async function setupOPFS() {
@@ -35,7 +35,7 @@ async function main() {
 
   // Get OPFS directory and create/open file
   const dirHandle = await navigator.storage.getDirectory();
-  const fileHandle = await getFileHandle(dirHandle, 'example-textlog.bjson', { create: true });
+  const fileHandle = await getFileHandle(dirHandle, 'example-textlog.bj', { create: true });
   const syncHandle = await fileHandle.createSyncAccessHandle();
 
   // Create a new TextLog with 3 diffs between snapshots
@@ -102,7 +102,7 @@ Our hero sets out on an epic journey.`;
 
   await log.close();
   await syncHandle.close();
-  await deleteFile(dirHandle, 'example-textlog.bjson');
+  await deleteFile(dirHandle, 'example-textlog.bj');
   console.log('\nTextLog closed successfully');
 }
 

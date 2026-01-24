@@ -1,5 +1,5 @@
 import { BPlusTree } from '../src/bplustree.js';
-import { getFileHandle, deleteFile } from '../src/bjson.js';
+import { getFileHandle, deleteFile } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 const nodeOpfs = await import('node-opfs');
@@ -11,7 +11,7 @@ Object.defineProperty(global, 'navigator', {
 
 // Get OPFS directory and create/open file
 const dirHandle = await navigator.storage.getDirectory();
-const fileHandle = await getFileHandle(dirHandle, 'example-iterator.bjson', { create: true });
+const fileHandle = await getFileHandle(dirHandle, 'example-iterator.bj', { create: true });
 const syncHandle = await fileHandle.createSyncAccessHandle();
 
 // Create and populate a tree
@@ -52,6 +52,6 @@ await tree.close();
 
 // Clean up
 await syncHandle.close();
-await deleteFile(dirHandle, 'example-iterator.bjson');
+await deleteFile(dirHandle, 'example-iterator.bj');
 
 console.log('\nDone!');

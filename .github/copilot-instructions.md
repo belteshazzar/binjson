@@ -4,7 +4,7 @@
 
 BJson is a compact binary encoding library for JSON data with browser OPFS (Origin Private File System) support. It provides efficient serialization/deserialization and file operations for both Node.js and browser environments.
 
-**Core architecture**: Single-file library ([bjson.js](../bjson.js)) with dual exports (CommonJS + browser globals) and custom binary protocol.
+**Core architecture**: Single-file library ([binjson.js](../binjson.js)) with dual exports (CommonJS + browser globals) and custom binary protocol.
 
 ## Binary Encoding Protocol
 
@@ -16,7 +16,7 @@ The project implements a custom binary format using type-prefixed encoding:
 - **ObjectId special handling**: MongoDB ObjectIds (24-char hex strings) are stored as 12 bytes (type 0x06)
 - **Date special handling**: JavaScript Date objects are encoded as 64-bit signed integer timestamps in milliseconds (type 0x07)
 
-**Key encoding patterns in [bjson.js](../bjson.js)**:
+**Key encoding patterns in [binjson.js](../binjson.js)**:
 - Numbers: Integers fitting in 32-bit signed range use TYPE.INT (5 bytes total), otherwise TYPE.FLOAT (9 bytes)
 - Strings: TYPE.STRING + 4-byte length + UTF-8 bytes
 - Dates: TYPE.DATE + 8-byte signed 64-bit integer (timestamp in milliseconds from Date.getTime())
