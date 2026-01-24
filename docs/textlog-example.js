@@ -7,8 +7,8 @@
  * - Generate human-readable diffs between versions
  */
 
-import { TextLog } from './src/textlog.js';
-import { getFileHandle, deleteFile } from './src/bjson.js';
+import { TextLog } from '../src/textlog.js';
+import { getFileHandle, deleteFile } from '../src/bjson.js';
 
 // Set up node-opfs for Node.js environment
 async function setupOPFS() {

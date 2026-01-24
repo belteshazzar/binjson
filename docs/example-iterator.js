@@ -1,5 +1,5 @@
-import { BPlusTree } from './src/bplustree.js';
-import { getFileHandle, deleteFile } from './src/bjson.js';
+import { BPlusTree } from '../src/bplustree.js';
+import { getFileHandle, deleteFile } from '../src/bjson.js';
 
 // Set up node-opfs for Node.js environment
 const nodeOpfs = await import('node-opfs');

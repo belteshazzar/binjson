@@ -6,7 +6,7 @@ A compact binary encoding format for JSON data with support for Origin Private F
 
 - 🚀 **Compact Binary Format**: Efficient binary encoding of JSON data
 - 💾 **OPFS Support**: Read and write binary JSON files using Origin Private File System
-- 🔄 **Full Round-trip**: Perfect encoding and decoding of all JSON types
+- 🔄 **Full Round-trip**: Encoding and decoding of all JSON types
 - 📦 **MongoDB ObjectId Support**: Native support for MongoDB ObjectIds (24-character hex strings)
 - 🎯 **File Pointer Support**: Built-in Pointer type for storing 64-bit file offsets for indexed data access
 - 🔍 **File Scanning**: Ability to scan through files and read records sequentially
@@ -549,7 +549,7 @@ node test.js
 
 ## License
 
-MIT License - See LICENSE file for details
+BSD 2-Clause License
 
 ## Contributing
 
