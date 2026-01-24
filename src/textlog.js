@@ -1,5 +1,5 @@
 /**
- * TextLog - Persistent text versioning system using BJsonFile
+ * TextLog - Persistent text versioning system using BinJsonFile
  * 
  * This implementation stores versions of a text document in an append-only file:
  * - Entries are either full snapshots or diffs from the previous version
@@ -16,7 +16,7 @@
  * - Final record: Metadata {version, snapshotPointer, latestPointer, diffCount, diffsPerSnapshot}
  */
 
-import { BJsonFile, Pointer } from './binjson.js';
+import { BinJsonFile, Pointer } from './binjson.js';
 import { createPatch, applyPatch, structuredPatch } from 'diff';
 import { createHash } from 'crypto';
 
@@ -40,7 +40,7 @@ export class TextLog {
       throw new Error('diffsPerSnapshot must be at least 1');
     }
     
-    this.file = new BJsonFile(syncHandle);
+    this.file = new BinJsonFile(syncHandle);
     this.diffsPerSnapshot = diffsPerSnapshot;
     
     this.isOpen = false;

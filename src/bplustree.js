@@ -1,5 +1,5 @@
 /**
- * BPlusTree - Persistent immutable B+ tree with BJsonFile storage
+ * BPlusTree - Persistent immutable B+ tree with BinJsonFile storage
  * 
  * Usage pattern:
  *   const tree = new BPlusTree('tree.bj');
@@ -8,7 +8,7 @@
  *   await tree.close();
  */
 
-import { BJsonFile, Pointer, getFileHandle, deleteFile } from './binjson.js';
+import { BinJsonFile, Pointer, getFileHandle, deleteFile } from './binjson.js';
 
 /**
  * Node for persistent storage
@@ -52,7 +52,7 @@ export class BPlusTree {
         if (order < 3) {
             throw new Error('B+ tree order must be at least 3');
         }
-        this.file = new BJsonFile(syncHandle);
+        this.file = new BinJsonFile(syncHandle);
         this.order = order;
         this.minKeys = Math.ceil(order / 2) - 1;
         

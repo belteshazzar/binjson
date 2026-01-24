@@ -1,5 +1,5 @@
 import { TextIndex } from '../src/textindex.js';
-import { BJsonFile } from '../src/binjson.js';
+import { BinJsonFile } from '../src/binjson.js';
 
 // Provide OPFS in Node using node-opfs (installed as devDependency)
 const nodeOpfs = await import('node-opfs');
@@ -17,7 +17,7 @@ async function cleanupBase(name) {
   ];
 
   for (const file of files) {
-    const handle = new BJsonFile(file);
+    const handle = new BinJsonFile(file);
     if (await handle.exists()) {
       await handle.open('rw');
       await handle.delete();

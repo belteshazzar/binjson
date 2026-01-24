@@ -1,5 +1,5 @@
 import { BPlusTree } from '../src/bplustree.js';
-import { BJsonFile } from '../src/binjson.js';
+import { BinJsonFile } from '../src/binjson.js';
 
 // Provide OPFS in Node using node-opfs (installed as devDependency)
 const nodeOpfs = await import('node-opfs');
@@ -11,7 +11,7 @@ Object.defineProperty(global, 'navigator', {
 
 // Helper to clean up a binjson file if it exists
 async function cleanup(filename) {
-  const file = new BJsonFile(filename);
+  const file = new BinJsonFile(filename);
   if (await file.exists()) {
     await file.open('rw');
     await file.delete();

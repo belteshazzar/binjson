@@ -32,16 +32,16 @@ The library must work in both Node.js and browsers via conditional exports:
 ```javascript
 // CommonJS export (Node.js)
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { TYPE, ObjectId, encode, decode, BJsonFile };
+  module.exports = { TYPE, ObjectId, encode, decode, BinJsonFile };
 }
 
 // Browser global
 if (typeof window !== 'undefined') {
-  window.BJson = { TYPE, ObjectId, encode, decode, BJsonFile };
+  window.BJson = { TYPE, ObjectId, encode, decode, BinJsonFile };
 }
 ```
 
-**When modifying**: Always export both ways. BJsonFile OPFS operations only work in browsers, but the class must be exportable in Node.js for testing.
+**When modifying**: Always export both ways. BinJsonFile OPFS operations only work in browsers, but the class must be exportable in Node.js for testing.
 
 ### Recursive Encoding Pattern
 
@@ -64,7 +64,7 @@ function encode(value) {
 
 ### OPFS File Operations
 
-BJsonFile uses lazy initialization pattern - `init()` is called by every public method:
+BinJsonFile uses lazy initialization pattern - `init()` is called by every public method:
 
 ```javascript
 async init() {

@@ -2,7 +2,7 @@
  * Test suite for binjson encoder/decoder
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
-import { TYPE, ObjectId, Pointer, encode, decode, BJsonFile, deleteFile, getFileHandle } from '../src/binjson.js';
+import { TYPE, ObjectId, Pointer, encode, decode, BinJsonFile, deleteFile, getFileHandle } from '../src/binjson.js';
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;
@@ -441,7 +441,7 @@ describe('Binary JSON Encoder/Decoder', () => {
   });
 });
 
-describe.skipIf(!hasOPFS)('BJsonFile', () => {
+describe.skipIf(!hasOPFS)('BinJsonFile', () => {
   const testFiles = ['test-binjsonfile.bj', 'test-binjsonfile2.bj'];
 
   afterEach(async () => {
@@ -456,7 +456,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   it('should write and read file', async () => {
     const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
-    const file = new BJsonFile(syncHandle);
+    const file = new BinJsonFile(syncHandle);
 
     const data = {
       name: 'Test Document',
@@ -488,7 +488,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   it('should check file existence', async () => {
     const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
-    const file = new BJsonFile(syncHandle);
+    const file = new BinJsonFile(syncHandle);
     
     file.write({ test: 'data' });
     file.flush();
@@ -508,7 +508,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   it('should append and scan records', async () => {
     const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile2.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
-    const file = new BJsonFile(syncHandle);
+    const file = new BinJsonFile(syncHandle);
     
     // Write first record
     file.write({ id: 1, name: 'First' });
@@ -534,7 +534,7 @@ describe.skipIf(!hasOPFS)('BJsonFile', () => {
   it('should delete file', async () => {
     const fileHandle = await getFileHandle(rootDirHandle, 'test-binjsonfile.bj', { create: true });
     const syncHandle = await fileHandle.createSyncAccessHandle();
-    const file = new BJsonFile(syncHandle);
+    const file = new BinJsonFile(syncHandle);
     
     file.write({ test: 'data' });
     file.flush();

@@ -1,5 +1,5 @@
 /**
- * On-Disk R-tree implementation using BJsonFile
+ * On-Disk R-tree implementation using BinJsonFile
  * 
  * This implementation stores all data in an append-only binjson file:
  * - Nodes are stored as binjson records
@@ -14,7 +14,7 @@
  *   - For leaf nodes: children are data entries with {bbox, lat, lng, data}
  */
 
-import { BJsonFile, Pointer, ObjectId, getFileHandle, deleteFile } from './binjson.js';
+import { BinJsonFile, Pointer, ObjectId, getFileHandle, deleteFile } from './binjson.js';
 
 /**
  * Calculate distance between two points using Haversine formula
@@ -149,7 +149,7 @@ class RTreeNode {
  */
 export class RTree {
 	constructor(syncHandle, maxEntries = 9) {
-		this.file = new BJsonFile(syncHandle);
+		this.file = new BinJsonFile(syncHandle);
 		this.maxEntries = maxEntries;
 		this.minEntries = Math.max(2, Math.ceil(maxEntries / 2));
 		

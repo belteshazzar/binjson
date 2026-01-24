@@ -557,7 +557,7 @@ function decode(data) {
  * IMPORTANT: This class wraps FileSystemSyncAccessHandle which is only available
  * in Web Workers. It provides synchronous file operations with explicit flush control.
  */
-class BJsonFile {
+class BinJsonFile {
   constructor(syncAccessHandle) {
     if (!syncAccessHandle) {
       throw new Error('FileSystemSyncAccessHandle is required');
@@ -784,7 +784,7 @@ export {
   Pointer,
   encode,
   decode,
-  BJsonFile,
+  BinJsonFile,
   exists,
   deleteFile,
   getFileHandle

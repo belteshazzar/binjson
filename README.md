@@ -1,6 +1,6 @@
 # Binary JSON (binjson)
 
-A compact binary encoding format for JSON data with support for Origin Private File System (OPFS) in browsers. This library enables efficient storage and retrieval of JSON data in a binary format, with support for MongoDB ObjectIds.
+A compact binary encoding format for JSON data with support for Origin Private File System (OPFS) in browsers. This library enables efficient storage and retrieval of JSON data in a binary format.
 
 ## Features
 
@@ -37,7 +37,7 @@ The library uses the following byte values for encoding JSON types:
 ### Node.js
 
 ```bash
-npm install binjson
+npm install @belteshazzar/binjson
 ```
 
 ### Browser
@@ -143,7 +143,7 @@ console.log(decoded.dataOffset.valueOf()); // 2048
 ### OPFS File Operations (Web Worker Only)
 
 **Important**: 
-- `BJsonFile` uses `FileSystemSyncAccessHandle` which is **only available in Web Workers**
+- `BinJsonFile` uses `FileSystemSyncAccessHandle` which is **only available in Web Workers**
 - Files must be explicitly opened before use and closed when done
 - A single file handle is used for all read/write operations, improving performance
 - Changes are automatically flushed to disk after each write/append operation
@@ -157,9 +157,9 @@ See [FILE-MODE-API.md](FILE-MODE-API.md) for detailed documentation.
 
 ```javascript
 // In a Web Worker:
-const { BJsonFile } = self.BJson;
+const { BinJsonFile } = self.BJson;
 
-const file = new BJsonFile('data.bj');
+const file = new BinJsonFile('data.bj');
 await file.open('rw');  // Open in read-write mode
 
 const data = { name: 'John', age: 30 };
@@ -172,7 +172,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bj');
+const file = new BinJsonFile('data.bj');
 await file.open('r');  // Open in read-only mode
 
 const data = await file.read();
@@ -185,7 +185,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bj');
+const file = new BinJsonFile('data.bj');
 await file.open('rw');  // Open in read-write mode
 
 // Write initial record
@@ -202,7 +202,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bj');
+const file = new BinJsonFile('data.bj');
 await file.open('r');  // Open in read-only mode
 
 for (const record of file.scan()) {
@@ -220,7 +220,7 @@ await file.close();
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bj');
+const file = new BinJsonFile('data.bj');
 
 // Check if file exists (doesn't require opening)
 const exists = await file.exists();
@@ -244,7 +244,7 @@ A single `FileSystemSyncAccessHandle` is used for all operations once opened, ma
 
 ```javascript
 // In a Web Worker:
-const file = new BJsonFile('data.bj');
+const file = new BinJsonFile('data.bj');
 await file.open('rw');  // Opens once with a single sync access handle
 
 // Multiple operations on the same handle - no need to reopen!
@@ -334,7 +334,7 @@ new Pointer(offset)
 - `toJSON()` - Returns the offset as a number for JSON serialization
 - `equals(other)` - Compares this Pointer with another for equality
 
-### `BJsonFile`
+### `BinJsonFile`
 
 Class for OPFS file operations using `FileSystemSyncAccessHandle`.
 
@@ -349,7 +349,7 @@ See [FILE-MODE-API.md](FILE-MODE-API.md) for detailed documentation.
 #### Constructor
 
 ```javascript
-new BJsonFile(filename)
+new BinJsonFile(filename)
 ```
 
 - **Parameters**: `filename` - Name of the file in OPFS
@@ -417,7 +417,7 @@ console.log(decoded);
 ### Batch File Operations
 
 ```javascript
-const file = new BJsonFile('products.bj');
+const file = new BinJsonFile('products.bj');
 await file.open('rw');  // Open once for multiple operations
 
 // Write multiple products
