@@ -1,6 +1,6 @@
 {
   "name": "bjson",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A compact binary encoding format for JSON data with support for Origin Private File System (OPFS) in browsers",
   "main": "src/bjson.js",
   "type": "module",
@@ -12,7 +12,7 @@
     "./textlog": "./src/textlog.js"
   },
   "bin": {
-    "bjson-decode": "./bin/bjson-decode.js"
+    "bjson-decode": "bin/bjson-decode.js"
   },
   "scripts": {
     "test": "vitest run",
