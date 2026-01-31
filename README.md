@@ -539,12 +539,44 @@ Available demos:
 - **rtree-compact.html**: R-tree spatial index with geographic queries
 - **textindex-compact.html**: Full-text search index with BM25 ranking
 
+## B+ Tree Implementations
+
+The library includes two B+ tree implementations for different use cases:
+
+### BPlusTree (Original)
+
+Values stored directly in tree nodes. Best for:
+- Small values (strings, numbers)
+- Read/search-heavy workloads
+- Maximum search performance
+
+### BPlusTreePtr (Pointer-based)
+
+Values stored separately with pointers in nodes. Best for:
+- Large/complex value objects
+- Insert-heavy workloads
+- Frequent value updates
+- Memory-constrained environments
+
+**Performance with large values (~3KB objects):**
+- 55-60% faster insertions
+- 43-60% faster searches
+- 60% smaller file sizes
+
+See [docs/pointer-implementation-summary.md](docs/pointer-implementation-summary.md) for detailed comparison and [BENCHMARK_QUICKSTART.md](BENCHMARK_QUICKSTART.md) to run benchmarks.
+
 ## Testing
 
 Run the test suite:
 
 ```bash
-node test.js
+npm test
+```
+
+Run performance benchmarks:
+
+```bash
+node benchmark/bplustree-comparison.js
 ```
 
 ## License
