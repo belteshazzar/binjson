@@ -52,3 +52,17 @@ emcc c/binjson.c c/bplustree.c c/bplustree_wasm.c \
   -o lib/bplustree-core.mjs
 
 echo "built lib/bplustree-core.mjs ($(wc -c < lib/bplustree-core.wasm) bytes wasm)"
+
+RT_EXPORTS='_malloc,_free,'\
+'_rtw_create,_rtw_load,_rtw_free,'\
+'_rtw_insert,_rtw_remove,_rtw_clear,_rtw_search,_rtw_compact,'\
+'_rtw_size,_rtw_max_entries,'\
+'_rtw_out_ptr,_rtw_out_len,_rtw_image_ptr,_rtw_image_len'
+
+emcc c/binjson.c c/rtree.c c/rtree_wasm.c \
+  "${COMMON_FLAGS[@]}" \
+  -sEXPORT_NAME=createRtreeModule \
+  -sEXPORTED_FUNCTIONS="$RT_EXPORTS" \
+  -o lib/rtree-core.mjs
+
+echo "built lib/rtree-core.mjs ($(wc -c < lib/rtree-core.wasm) bytes wasm)"

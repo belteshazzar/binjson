@@ -10,6 +10,7 @@
     "./bplustree": "./src/bplustree.js",
     "./bplustree-wasm": "./src/bplustree-wasm.js",
     "./rtree": "./src/rtree.js",
+    "./rtree-wasm": "./src/rtree-wasm.js",
     "./textindex": "./src/textindex.js",
     "./textlog": "./src/textlog.js"
   },
