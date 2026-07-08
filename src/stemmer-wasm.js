@@ -9,7 +9,7 @@
  * This is a drop-in replacement for `import { stemmer } from 'stemmer'`, used as
  * a dependency of the forthcoming WASM TextIndex port.
  */
-import createStemmerModule from '../lib/stemmer-core.mjs';
+import createStemmerModule from '../lib/stemmer.wasm.mjs';
 
 let Module = null;
 let readyPromise = null;

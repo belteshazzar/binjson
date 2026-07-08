@@ -11,7 +11,7 @@
  * Output matches jsdiff exactly; see test/textlog-interop.test.js. The module
  * loads asynchronously — await ready() before calling.
  */
-import createDiffModule from '../lib/diff-core.mjs';
+import createDiffModule from '../lib/diff.wasm.mjs';
 
 let Module = null;
 let readyPromise = null;

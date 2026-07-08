@@ -572,7 +572,7 @@ rebuild them you need the [Emscripten SDK](https://emscripten.org/) (`emcc`) on
 your `PATH`:
 
 ```bash
-npm run build:wasm   # emits lib/binjson-core.{mjs,wasm}
+npm run build:wasm   # emits lib/binjson.wasm.mjs + lib/binjson.wasm
 ```
 
 The wire format is specified in [FORMAT.md](FORMAT.md). The C codec has its own

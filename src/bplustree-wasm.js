@@ -15,7 +15,7 @@
  * The WASM module loads asynchronously; open() awaits it, so — as with the
  * reference — call and await open() before any other method.
  */
-import createBplustreeModule from '../lib/bplustree-core.mjs';
+import createBplustreeModule from '../lib/bplustree.wasm.mjs';
 import { encode, decode } from './binjson.js';
 
 // Error codes — must match the BJ_ERR_* constants in c/binjson.h.

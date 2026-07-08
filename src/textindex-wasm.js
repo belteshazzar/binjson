@@ -6,12 +6,12 @@
  * WebAssembly (see c/textindex.c, c/stemmer.c), operating on three C B+ trees
  * (c/bplustree.c). The OPFS file I/O for the three tree files stays in JS.
  *
- * This module exports its own WASM `BPlusTree` (backed by the textindex-core
+ * This module exports its own WASM `BPlusTree` (backed by the textindex WASM
  * module) plus `TextIndex`; construct the three trees and hand them to
  * TextIndex exactly as with the reference. The WASM module loads asynchronously
  * — await the trees' open() (which awaits it) before use.
  */
-import createTextindexModule from '../lib/textindex-core.mjs';
+import createTextindexModule from '../lib/textindex.wasm.mjs';
 import { encode, decode } from './binjson.js';
 
 // Error codes — must match the BJ_ERR_* constants in c/binjson.h.
@@ -64,7 +64,7 @@ function allocStr(M, str) {
 
 /**
  * WASM B+ tree used to back a TextIndex. A trimmed sibling of
- * src/bplustree-wasm.js (same textindex-core module) exposing the tree handle
+ * src/bplustree-wasm.js (same textindex WASM module) exposing the tree handle
  * (`ctx`) so the C index code can mutate it directly, plus `syncAfter()` to
  * flush the appended bytes back to OPFS after those mutations.
  */

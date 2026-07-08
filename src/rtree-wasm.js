@@ -20,7 +20,7 @@
  * The WASM module loads asynchronously; open() awaits it, so — as with the
  * reference — call and await open() before any other method.
  */
-import createRtreeModule from '../lib/rtree-core.mjs';
+import createRtreeModule from '../lib/rtree.wasm.mjs';
 import { decode, ObjectId } from './binjson.js';
 
 // Error codes — must match the BJ_ERR_* constants in c/binjson.h.
