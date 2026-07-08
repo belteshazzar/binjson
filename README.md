@@ -538,6 +538,7 @@ Available demos:
 - **bplustree-compact.html**: B+ tree index with compaction
 - **rtree-compact.html**: R-tree spatial index with geographic queries
 - **textindex-compact.html**: Full-text search index with BM25 ranking
+- **diff.html**: Live 3-column diff of two text versions, computed by the WASM port of `diff` (no worker build required)
 
 ## WebAssembly Codec
 

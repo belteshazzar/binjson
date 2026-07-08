@@ -256,8 +256,7 @@ export class TextIndex {
    */
   async getTermCount() {
     this._ensureOpen();
-    const terms = await this.index.toArray();
-    return terms.length;
+    return this.index.size();
   }
 
   /**
@@ -266,8 +265,7 @@ export class TextIndex {
    */
   async getDocumentCount() {
     this._ensureOpen();
-    const docs = await this.documentTerms.toArray();
-    return docs.length;
+    return this.documentTerms.size();
   }
 
   /**

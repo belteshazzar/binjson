@@ -55,14 +55,70 @@ echo "built lib/bplustree-core.mjs ($(wc -c < lib/bplustree-core.wasm) bytes was
 
 RT_EXPORTS='_malloc,_free,'\
 '_rtw_create,_rtw_load,_rtw_free,'\
-'_rtw_insert,_rtw_remove,_rtw_clear,_rtw_search,_rtw_compact,'\
+'_rtw_insert,_rtw_remove,_rtw_clear,_rtw_search,_rtw_search_radius,_rtw_haversine,_rtw_compact,'\
 '_rtw_size,_rtw_max_entries,'\
 '_rtw_out_ptr,_rtw_out_len,_rtw_image_ptr,_rtw_image_len'
 
-emcc c/binjson.c c/rtree.c c/rtree_wasm.c \
+emcc c/binjson.c c/geo.c c/rtree.c c/rtree_wasm.c \
   "${COMMON_FLAGS[@]}" \
   -sEXPORT_NAME=createRtreeModule \
   -sEXPORTED_FUNCTIONS="$RT_EXPORTS" \
   -o lib/rtree-core.mjs
 
 echo "built lib/rtree-core.mjs ($(wc -c < lib/rtree-core.wasm) bytes wasm)"
+
+TL_EXPORTS='_malloc,_free,'\
+'_tlw_create,_tlw_load,_tlw_free,'\
+'_tlw_add_version,_tlw_get_version,_tlw_get_version_hash,_tlw_get_diff,'\
+'_tlw_version,_tlw_diffs_per_snapshot,'\
+'_tlw_out_ptr,_tlw_out_len,_tlw_image_ptr,_tlw_image_len'
+
+emcc c/binjson.c c/diff.c c/textlog.c c/textlog_wasm.c \
+  "${COMMON_FLAGS[@]}" \
+  -sEXPORT_NAME=createTextlogModule \
+  -sEXPORTED_FUNCTIONS="$TL_EXPORTS" \
+  -o lib/textlog-core.mjs
+
+echo "built lib/textlog-core.mjs ($(wc -c < lib/textlog-core.wasm) bytes wasm)"
+
+# Standalone diff engine (jsdiff port) for the browser demo (public/diff.html)
+# and src/diff-wasm.js. diff.c has no other dependencies.
+DF_EXPORTS='_malloc,_free,_diff_create_patch,_diff_get_diff,_diff_apply_patch'
+
+emcc c/diff.c \
+  "${COMMON_FLAGS[@]}" \
+  -sEXPORT_NAME=createDiffModule \
+  -sEXPORTED_FUNCTIONS="$DF_EXPORTS" \
+  -o lib/diff-core.mjs
+
+echo "built lib/diff-core.mjs ($(wc -c < lib/diff-core.wasm) bytes wasm)"
+
+# Standalone Porter stemmer (stemmer@2.0.1 port) for src/stemmer-wasm.js and the
+# eventual textindex WASM port. stemmer.c has no other dependencies.
+ST_EXPORTS='_malloc,_free,_stemmer_stem'
+
+emcc c/stemmer.c \
+  "${COMMON_FLAGS[@]}" \
+  -sEXPORT_NAME=createStemmerModule \
+  -sEXPORTED_FUNCTIONS="$ST_EXPORTS" \
+  -o lib/stemmer-core.mjs
+
+echo "built lib/stemmer-core.mjs ($(wc -c < lib/stemmer-core.wasm) bytes wasm)"
+
+# Full-text index: textindex.c on top of the B+ tree, binjson and stemmer ports.
+# Exports the bplustree glue too, so the JS shim can manage the three tree files.
+TI_EXPORTS='_malloc,_free,'\
+'_bptw_create,_bptw_load,_bptw_free,'\
+'_bptw_add,_bptw_delete,_bptw_search,_bptw_entries,_bptw_range,_bptw_height,'\
+'_bptw_size,_bptw_root,_bptw_next_id,_bptw_order,'\
+'_bptw_out_ptr,_bptw_out_len,_bptw_image_ptr,_bptw_image_len,'\
+'_tixw_add,_tixw_remove,_tixw_clear,_tixw_query,_tixw_query_all,'\
+'_tixw_out_ptr,_tixw_out_len'
+
+emcc c/binjson.c c/bplustree.c c/bplustree_wasm.c c/stemmer.c c/textindex.c c/textindex_wasm.c \
+  "${COMMON_FLAGS[@]}" \
+  -sEXPORT_NAME=createTextindexModule \
+  -sEXPORTED_FUNCTIONS="$TI_EXPORTS" \
+  -o lib/textindex-core.mjs
+
+echo "built lib/textindex-core.mjs ($(wc -c < lib/textindex-core.wasm) bytes wasm)"

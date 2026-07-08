@@ -13,9 +13,9 @@
  * plus a 12-byte ObjectId; search/compact results come back as binjson bytes
  * decoded with src/binjson.js.
  *
- * Haversine / radius math stays here (identical to the reference) so results
- * match: C returns the entries inside a query bounding box and JS applies the
- * distance filter.
+ * Radius search runs entirely in C (see c/geo.c + rtree_search_radius): the
+ * haversine distance and radius-to-bbox math use the WASM libm, so reported
+ * distances may differ from the reference by a few ULPs.
  *
  * The WASM module loads asynchronously; open() awaits it, so — as with the
  * reference — call and await open() before any other method.
@@ -62,28 +62,13 @@ function codeError(code, context) {
   return new Error(context ? `${msg} (${context})` : msg);
 }
 
-/** Haversine distance in kilometers (matches the reference). */
+/**
+ * Haversine distance in kilometers, computed by the WASM libm (c/geo.c).
+ * Requires the module to be instantiated — call ready() (or open() a tree)
+ * first.
+ */
 export function haversineDistance(lat1, lng1, lat2, lng2) {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLng = (lng2 - lng1) * Math.PI / 180;
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLng / 2) * Math.sin(dLng / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
-}
-
-/** Convert a radius query into a bounding box (matches the reference). */
-function radiusToBoundingBox(lat, lng, radiusKm) {
-  const latDelta = radiusKm / 111;
-  const lngDelta = radiusKm / (111 * Math.cos(lat * Math.PI / 180));
-  return {
-    minLat: lat - latDelta,
-    maxLat: lat + latDelta,
-    minLng: lng - lngDelta,
-    maxLng: lng + lngDelta
-  };
+  return requireModule()._rtw_haversine(lat1, lng1, lat2, lng2);
 }
 
 /**
@@ -245,22 +230,20 @@ export class RTree {
 
   /**
    * Search for points within a radius (km) of a location; returns
-   * { objectId, lat, lng, distance }.
+   * { objectId, lat, lng, distance }. The radius-to-bbox conversion, tree
+   * traversal and haversine distance filter all run in C (c/geo.c + rtree.c).
    */
   searchRadius(lat, lng, radiusKm) {
     if (!this.isOpen) {
       throw new Error('R-tree file must be opened before use');
     }
-    const bbox = radiusToBoundingBox(lat, lng, radiusKm);
-    const candidates = this._searchBBoxRaw(bbox);
-    const results = [];
-    for (const entry of candidates) {
-      const dist = haversineDistance(lat, lng, entry.lat, entry.lng);
-      if (dist <= radiusKm) {
-        results.push({ objectId: entry.objectId, lat: entry.lat, lng: entry.lng, distance: dist });
-      }
-    }
-    return results;
+    const M = requireModule();
+    const rc = M._rtw_search_radius(this.ctx, lat, lng, radiusKm);
+    if (rc !== 0) throw codeError(rc, 'searchRadius');
+    const ptr = M._rtw_out_ptr(this.ctx);
+    const len = M._rtw_out_len(this.ctx);
+    if (len === 0) return [];
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
   }
 
   /** Drop all entries by appending a fresh empty root. */

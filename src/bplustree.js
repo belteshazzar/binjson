@@ -245,7 +245,11 @@ export class BPlusTree {
         const rootPointer = this._saveNode(newRoot);
         this.rootPointer = rootPointer;
 
-        this._size++;
+        // Only count a genuinely new key; updating an existing key's value
+        // leaves the number of distinct keys unchanged.
+        if (!result.updated) {
+            this._size++;
+        }
         this._saveMetadata();
     }
 
@@ -261,7 +265,8 @@ export class BPlusTree {
             if (existingIdx !== -1) {
                 values[existingIdx] = value;
                 return {
-                    newNode: new NodeData(node.id, true, keys, values, [], null)
+                    newNode: new NodeData(node.id, true, keys, values, [], null),
+                    updated: true
                 };
             }
 
@@ -308,7 +313,8 @@ export class BPlusTree {
                 const newChildPointer = this._saveNode(result.newNode);
                 children[childIdx] = newChildPointer;
                 return {
-                    newNode: new NodeData(node.id, false, keys, [], children, null)
+                    newNode: new NodeData(node.id, false, keys, [], children, null),
+                    updated: result.updated
                 };
             } else {
                 const leftPointer = this._saveNode(result.left);

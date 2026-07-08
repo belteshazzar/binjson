@@ -155,7 +155,7 @@ export function runBPlusTreeSuite(label, BPlusTree, hasOPFS) {
 
         const result = await tree.search(10);
         expect(result).toBe('TEN');
-        expect(tree.size()).toBe(2); // Note: persistent version increments size on update
+        expect(tree.size()).toBe(1); // Updating an existing key doesn't change the key count
       });
 
       it('should handle string keys', async function () {
