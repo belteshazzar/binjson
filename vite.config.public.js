@@ -6,7 +6,7 @@ export default defineConfig({
     format: 'es'
   },
   build: {
-    outDir: 'dist',
+    outDir: 'site',
     rollupOptions: {
       input: {
         worker: resolve(__dirname, 'public/worker.js'),

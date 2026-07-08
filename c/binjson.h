@@ -89,6 +89,14 @@ int bj_put_oid(bj_builder *b, const uint8_t *bytes12);  /* exactly 12 bytes */
 int bj_put_date(bj_builder *b, int64_t millis);  /* -> DATE (i64 ms)       */
 int bj_put_pointer(bj_builder *b, uint64_t off); /* -> POINTER (u64)       */
 
+/*
+ * Emit an already-encoded value verbatim. `bytes`/`len` must be exactly one
+ * complete binjson value (as produced by this codec). Counts as a single value
+ * against the enclosing container. Used to splice opaque, pre-encoded payloads
+ * (e.g. B+ tree node values) without decoding and re-encoding them.
+ */
+int bj_put_raw(bj_builder *b, const uint8_t *bytes, uint32_t len);
+
 /* Containers. Elements/entries emitted between begin and end. */
 int bj_begin_array(bj_builder *b);
 int bj_end_array(bj_builder *b);

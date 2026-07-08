@@ -10,7 +10,7 @@
  * The WASM module loads asynchronously; call and await `ready()` once before
  * using the synchronous encode/decode (e.g. at worker startup).
  */
-import createBinjsonModule from './wasm/binjson-core.mjs';
+import createBinjsonModule from '../lib/binjson-core.mjs';
 import {
   TYPE,
   ObjectId,

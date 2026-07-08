@@ -273,7 +273,7 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
     let currentBinary = null;
 
     // Initialize web worker for file operations
-    const worker = new Worker('/dist/worker.js');
+    const worker = new Worker('/site/worker.js');
     let workerMessageId = 0;
     const workerPromises = new Map();
     

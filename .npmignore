@@ -1,9 +1,10 @@
 .github
+c
 coverage
-dist
 docs
 public
 rollup.config.js
+site
 test
 vite.config.public.js
 vitest.config.js

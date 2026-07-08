@@ -525,7 +525,7 @@ The demos require a build step to bundle the worker with its dependencies (inclu
 npm run build:worker
 ```
 
-This creates `dist/worker.js` which bundles all necessary dependencies.
+This creates `site/worker.js` which bundles all necessary dependencies.
 
 ### Running Demos
 
@@ -565,12 +565,13 @@ const decoded = decode(binary); // { name: 'John', age: 30 }
 
 ### Building the WASM codec
 
-The C sources live in `c/`. The prebuilt artifacts ship in `src/wasm/`, so no
-toolchain is needed to *use* the package. To rebuild them you need the
-[Emscripten SDK](https://emscripten.org/) (`emcc`) on your `PATH`:
+The C sources live in `c/`. The prebuilt artifacts ship in `lib/` (rebuilt
+automatically on `prepack`), so no toolchain is needed to *use* the package. To
+rebuild them you need the [Emscripten SDK](https://emscripten.org/) (`emcc`) on
+your `PATH`:
 
 ```bash
-npm run build:wasm   # emits src/wasm/binjson-core.{mjs,wasm}
+npm run build:wasm   # emits lib/binjson-core.{mjs,wasm}
 ```
 
 The wire format is specified in [FORMAT.md](FORMAT.md). The C codec has its own

@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
-# Build the binjson WASM codec with Emscripten.
-# Produces dist/wasm/binjson-core.mjs + binjson-core.wasm (loaded by
-# src/binjson-wasm.js). Requires `emcc` on PATH (emsdk).
+# Build the binjson + bplustree WASM modules with Emscripten.
+# Produces lib/binjson-core.mjs and lib/bplustree-core.mjs (+ .wasm), loaded by
+# src/binjson-wasm.js and src/bplustree-wasm.js via ../lib. Requires `emcc` on
+# PATH (emsdk).
 set -euo pipefail
 
-# Output into src/ so the artifacts ship with the package (dist/ is gitignored
-# and npmignored).
+# Output into lib/ (gitignored). These generated artifacts are shipped with the
+# package via the "files" allowlist in package.json and rebuilt on prepack.
 cd "$(dirname "$0")/.."
-mkdir -p src/wasm
+mkdir -p lib
+
+# Flags shared by both modules.
+COMMON_FLAGS=(
+  -O3
+  -flto
+  -sMODULARIZE=1
+  -sEXPORT_ES6=1
+  -sALLOW_MEMORY_GROWTH=1
+  -sENVIRONMENT=web,worker,node
+  -sEXPORTED_RUNTIME_METHODS=HEAPU8
+  -sALLOW_TABLE_GROWTH=0
+  -sFILESYSTEM=0
+  --no-entry
+)
 
 EXPORTS='_malloc,_free,'\
 '_bjw_enc_reset,_bjw_put_null,_bjw_put_bool,_bjw_put_int,_bjw_put_float,'\
@@ -17,18 +32,23 @@ EXPORTS='_malloc,_free,'\
 '_bjw_decode,_bjw_events_ptr,_bjw_events_len,_bjw_consumed,_bjw_value_size'
 
 emcc c/binjson.c c/binjson_wasm.c \
-  -O3 \
-  -flto \
-  -sMODULARIZE=1 \
-  -sEXPORT_ES6=1 \
+  "${COMMON_FLAGS[@]}" \
   -sEXPORT_NAME=createBinjsonModule \
-  -sALLOW_MEMORY_GROWTH=1 \
-  -sENVIRONMENT=web,worker,node \
   -sEXPORTED_FUNCTIONS="$EXPORTS" \
-  -sEXPORTED_RUNTIME_METHODS=HEAPU8 \
-  -sALLOW_TABLE_GROWTH=0 \
-  -sFILESYSTEM=0 \
-  --no-entry \
-  -o src/wasm/binjson-core.mjs
+  -o lib/binjson-core.mjs
 
-echo "built src/wasm/binjson-core.mjs ($(wc -c < src/wasm/binjson-core.wasm) bytes wasm)"
+echo "built lib/binjson-core.mjs ($(wc -c < lib/binjson-core.wasm) bytes wasm)"
+
+BPT_EXPORTS='_malloc,_free,'\
+'_bptw_create,_bptw_load,_bptw_free,'\
+'_bptw_add,_bptw_delete,_bptw_search,_bptw_entries,_bptw_range,_bptw_height,'\
+'_bptw_size,_bptw_root,_bptw_next_id,_bptw_order,'\
+'_bptw_out_ptr,_bptw_out_len,_bptw_image_ptr,_bptw_image_len'
+
+emcc c/binjson.c c/bplustree.c c/bplustree_wasm.c \
+  "${COMMON_FLAGS[@]}" \
+  -sEXPORT_NAME=createBplustreeModule \
+  -sEXPORTED_FUNCTIONS="$BPT_EXPORTS" \
+  -o lib/bplustree-core.mjs
+
+echo "built lib/bplustree-core.mjs ($(wc -c < lib/bplustree-core.wasm) bytes wasm)"

@@ -28,7 +28,7 @@
     const runBtn = document.getElementById('run');
 
     // Initialize web worker for sync file operations
-    const worker = new Worker('/dist/worker.js');
+    const worker = new Worker('/site/worker.js');
     let workerMessageId = 0;
     const workerPromises = new Map();
     

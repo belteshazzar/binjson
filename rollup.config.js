@@ -4,7 +4,7 @@ import commonjs from '@rollup/plugin-commonjs';
 export default {
   input: 'public/worker.js',
   output: {
-    file: 'dist/worker.js',
+    file: 'site/worker.js',
     format: 'es'
   },
   plugins: [

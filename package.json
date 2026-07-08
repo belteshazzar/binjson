@@ -8,6 +8,7 @@
     ".": "./src/binjson.js",
     "./wasm": "./src/binjson-wasm.js",
     "./bplustree": "./src/bplustree.js",
+    "./bplustree-wasm": "./src/bplustree-wasm.js",
     "./rtree": "./src/rtree.js",
     "./textindex": "./src/textindex.js",
     "./textlog": "./src/textlog.js"
@@ -15,6 +16,11 @@
   "bin": {
     "binjson-decode": "bin/binjson-decode.js"
   },
+  "files": [
+    "src",
+    "bin",
+    "lib"
+  ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
@@ -22,9 +28,10 @@
     "test:coverage": "vitest --coverage",
     "build:worker": "rollup -c rollup.config.js",
     "build:wasm": "./c/build-wasm.sh",
+    "prepack": "npm run build:wasm",
     "test:wasm": "node c/test-wasm.mjs",
     "test:c": "cc -std=c11 -Wall -Wextra -Werror c/binjson.c c/test_binjson.c -o /tmp/bjtest && /tmp/bjtest",
-    "serve": "http-server -c-1 . -p 8080"
+    "serve": "http-server -c-1 . -p 8083"
   },
   "keywords": [
     "binary",

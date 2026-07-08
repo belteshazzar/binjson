@@ -214,6 +214,13 @@ static int bld_put_lenpref(bj_builder *b, uint8_t type,
     return BJ_OK;
 }
 
+int bj_put_raw(bj_builder *b, const uint8_t *bytes, uint32_t len) {
+    if (b->error) return b->error;
+    int e = bld_note_value(b);
+    if (e) return bld_fail(b, e);
+    return bld_fail(b, bld_append(b, bytes, len));
+}
+
 int bj_put_string(bj_builder *b, const uint8_t *utf8, uint32_t len) {
     return bld_put_lenpref(b, BJ_TYPE_STRING, utf8, len);
 }
