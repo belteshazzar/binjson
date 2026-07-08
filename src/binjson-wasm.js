@@ -10,12 +10,11 @@
  * The WASM module loads asynchronously; call and await `ready()` once before
  * using the synchronous encode/decode (e.g. at worker startup).
  */
-import createBinjsonModule from '../dist/wasm/binjson-core.mjs';
+import createBinjsonModule from './wasm/binjson-core.mjs';
 import {
   TYPE,
   ObjectId,
   Pointer,
-  BinJsonFile,
   exists,
   deleteFile,
   getFileHandle
@@ -229,6 +228,106 @@ function decode(data) {
   const evPtr = M._bjw_events_ptr();
   const evLen = M._bjw_events_len();
   return readEvents(M, evPtr, evLen);
+}
+
+/**
+ * Total on-wire size of the value whose leading bytes are `header`, computed by
+ * the C codec (bj_value_size). `header` only needs the type byte plus, for
+ * length-prefixed/container types, the 4-byte size field (i.e. up to 5 bytes).
+ */
+function wasmValueSize(M, header) {
+  const n = header.length;
+  const inPtr = M._malloc(n + 4);
+  M.HEAPU8.set(header, inPtr);
+  const outPtr = inPtr + n;
+  const rc = M._bjw_value_size(inPtr, n, 0, outPtr);
+  let size = 0;
+  if (rc === 0) {
+    size = new DataView(M.HEAPU8.buffer).getUint32(outPtr, true);
+  }
+  M._free(inPtr);
+  if (rc !== 0) throw codeError(rc, 'value_size');
+  return size;
+}
+
+/**
+ * OPFS-backed file using a FileSystemSyncAccessHandle, with the binjson codec
+ * running in WASM. Byte-level work (encode/decode + scan record sizing) is done
+ * in C; only the raw synchronous handle calls (read/write/truncate/getSize/
+ * flush) — which are browser APIs with no WASM equivalent — stay in JS.
+ *
+ * As with the reference, this requires FileSystemSyncAccessHandle (Web Workers)
+ * and the WASM module to be initialized (await ready() first).
+ */
+class BinJsonFile {
+  constructor(syncAccessHandle) {
+    if (!syncAccessHandle) {
+      throw new Error('FileSystemSyncAccessHandle is required');
+    }
+    this.syncAccessHandle = syncAccessHandle;
+  }
+
+  /** Read a range of bytes, returning only what was actually read. */
+  #readRange(start, length) {
+    const buffer = new Uint8Array(length);
+    const bytesRead = this.syncAccessHandle.read(buffer, { at: start });
+    return bytesRead < length ? buffer.slice(0, bytesRead) : buffer;
+  }
+
+  getFileSize() {
+    return this.syncAccessHandle.getSize();
+  }
+
+  /** Encode and write `data`, replacing any existing content. */
+  write(data) {
+    const binaryData = encode(data);
+    this.syncAccessHandle.truncate(0);
+    this.syncAccessHandle.write(binaryData, { at: 0 });
+  }
+
+  /** Read and decode the value at `pointer` (default: start of file). */
+  read(pointer = new Pointer(0)) {
+    const fileSize = this.getFileSize();
+    if (fileSize === 0) {
+      throw new Error('File is empty');
+    }
+    const pointerValue = pointer.valueOf();
+    if (pointerValue < 0 || pointerValue >= fileSize) {
+      throw new Error(`Pointer offset ${pointer} out of file bounds [0, ${fileSize})`);
+    }
+    const binaryData = this.#readRange(pointerValue, fileSize - pointerValue);
+    return decode(binaryData);
+  }
+
+  /** Encode and append `data` without truncating existing content. */
+  append(data) {
+    const binaryData = encode(data);
+    const existingSize = this.getFileSize();
+    this.syncAccessHandle.write(binaryData, { at: existingSize });
+  }
+
+  flush() {
+    this.syncAccessHandle.flush();
+  }
+
+  /** Yield each top-level record in the file, decoded one at a time. */
+  *scan() {
+    const fileSize = this.getFileSize();
+    if (fileSize === 0) return;
+
+    const M = requireModule();
+    let offset = 0;
+    while (offset < fileSize) {
+      // The value-size header needs at most type byte + 4-byte length field.
+      const headerLen = Math.min(5, fileSize - offset);
+      const header = this.#readRange(offset, headerLen);
+      const valueSize = wasmValueSize(M, header);
+
+      const valueData = this.#readRange(offset, valueSize);
+      offset += valueSize;
+      yield decode(valueData);
+    }
+  }
 }
 
 export {

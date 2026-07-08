@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/binjson.js",
+    "./wasm": "./src/binjson-wasm.js",
     "./bplustree": "./src/bplustree.js",
     "./rtree": "./src/rtree.js",
     "./textindex": "./src/textindex.js",

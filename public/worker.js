@@ -6,6 +6,19 @@ import { BPlusTree } from '../src/bplustree.js';
 import { RTree } from '../src/rtree.js';
 import { TextIndex } from '../src/textindex.js';
 
+// Resolve the OPFS root, with a clear error when it isn't available. OPFS is
+// only exposed in a secure context (https or http://localhost) and in browsers
+// that support it (Chrome/Edge/Opera 102+, Safari 16.4+).
+async function getRootDir() {
+  if (typeof navigator === 'undefined' || !navigator.storage || !navigator.storage.getDirectory) {
+    throw new Error(
+      'OPFS is not available in this context. Serve over https or http://localhost ' +
+      'and use Chrome/Edge/Opera 102+ or Safari 16.4+.'
+    );
+  }
+  return navigator.storage.getDirectory();
+}
+
 // Helper function to read all data from sync handle
 function readAllData(syncHandle) {
   const size = syncHandle.getSize();
@@ -26,7 +39,7 @@ self.addEventListener('message', async (event) => {
     
     switch (operation) {
       case 'write': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: true });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -43,20 +56,33 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'read': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
-        
+
         const buffer = readAllData(syncHandle);
         const decoded = buffer.length > 0 ? decode(buffer) : null;
-        
+
         await syncHandle.close();
         result = decoded;
         break;
       }
+
+      // Return the raw file bytes so the main thread can decode with a chosen
+      // codec (JS or WASM) and preserve rich types (ObjectId/Pointer/etc.).
+      case 'read-bytes': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const buffer = readAllData(syncHandle);
+        await syncHandle.close();
+        result = Array.from(buffer);
+        break;
+      }
       
       case 'append': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: true });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -72,7 +98,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'scan': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -102,7 +128,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'delete': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         try {
           await dirHandle.removeEntry(filename);
         } catch (err) {
@@ -115,7 +141,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'exists': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         let exists = false;
         try {
           // Explicitly use create: false to avoid creating the file
@@ -130,7 +156,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'bplustree-create': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: true });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -144,7 +170,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'bplustree-add': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -159,7 +185,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'bplustree-toArray': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -173,7 +199,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'bplustree-compact': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -193,7 +219,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'rtree-create': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: true });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -207,7 +233,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'rtree-insert': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -225,7 +251,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'rtree-searchRadius': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -240,7 +266,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'rtree-searchBBox': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -255,7 +281,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'rtree-compact': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         
@@ -275,7 +301,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'textindex-create': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const { baseName, order } = data;
         
         // Create three BPlusTree files for TextIndex
@@ -306,7 +332,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'textindex-add': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const { baseName, docId, text } = data;
         
         // Open the three BPlusTree files
@@ -340,7 +366,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'textindex-query': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const { baseName, queryText, options } = data;
         
         // Open the three BPlusTree files
@@ -374,7 +400,7 @@ self.addEventListener('message', async (event) => {
       }
       
       case 'textindex-compact': {
-        const dirHandle = await navigator.storage.getDirectory();
+        const dirHandle = await getRootDir();
         const { baseName, compactBaseName } = data;
         
         // Open source trees

@@ -539,12 +539,50 @@ Available demos:
 - **rtree-compact.html**: R-tree spatial index with geographic queries
 - **textindex-compact.html**: Full-text search index with BM25 ranking
 
-## Testing
+## WebAssembly Codec
 
-Run the test suite:
+A drop-in WebAssembly build of the codec is available at `@belteshazzar/binjson/wasm`.
+The byte-level encode/decode (and record sizing used by `BinJsonFile.scan()`) run
+in C compiled to WASM; the value types (`ObjectId`, `Pointer`) and the OPFS layer
+are unchanged. The **wire format is identical**, so the WASM and pure-JS codecs
+interoperate freely — data written by one reads back with the other.
+
+The only API difference: the WASM module loads asynchronously, so you must
+`await ready()` once before the (synchronous) `encode`/`decode`:
+
+```javascript
+import { ready, encode, decode } from '@belteshazzar/binjson/wasm';
+
+await ready(); // instantiate the WASM module once (e.g. at worker startup)
+
+const binary = encode({ name: 'John', age: 30 });
+const decoded = decode(binary); // { name: 'John', age: 30 }
+```
+
+`ObjectId`, `Pointer`, `TYPE`, `BinJsonFile`, `exists`, `deleteFile`, and
+`getFileHandle` are all exported with the same signatures as the main module.
+`isReady()` reports whether initialization has completed.
+
+### Building the WASM codec
+
+The C sources live in `c/`. The prebuilt artifacts ship in `src/wasm/`, so no
+toolchain is needed to *use* the package. To rebuild them you need the
+[Emscripten SDK](https://emscripten.org/) (`emcc`) on your `PATH`:
 
 ```bash
-node test.js
+npm run build:wasm   # emits src/wasm/binjson-core.{mjs,wasm}
+```
+
+The wire format is specified in [FORMAT.md](FORMAT.md). The C codec has its own
+native conformance test (`npm run test:c`) and an end-to-end parity/fuzz suite
+against the reference (`npm run test:wasm`, plus `test/binjson-wasm*.test.js`).
+
+## Testing
+
+Run the test suite (covers both the JS and WASM codecs):
+
+```bash
+npm test
 ```
 
 ## License

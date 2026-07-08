@@ -4,8 +4,10 @@
 # src/binjson-wasm.js). Requires `emcc` on PATH (emsdk).
 set -euo pipefail
 
+# Output into src/ so the artifacts ship with the package (dist/ is gitignored
+# and npmignored).
 cd "$(dirname "$0")/.."
-mkdir -p dist/wasm
+mkdir -p src/wasm
 
 EXPORTS='_malloc,_free,'\
 '_bjw_enc_reset,_bjw_put_null,_bjw_put_bool,_bjw_put_int,_bjw_put_float,'\
@@ -27,6 +29,6 @@ emcc c/binjson.c c/binjson_wasm.c \
   -sALLOW_TABLE_GROWTH=0 \
   -sFILESYSTEM=0 \
   --no-entry \
-  -o dist/wasm/binjson-core.mjs
+  -o src/wasm/binjson-core.mjs
 
-echo "built dist/wasm/binjson-core.mjs ($(wc -c < dist/wasm/binjson-core.wasm) bytes wasm)"
+echo "built src/wasm/binjson-core.mjs ($(wc -c < src/wasm/binjson-core.wasm) bytes wasm)"

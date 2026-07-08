@@ -100,6 +100,18 @@
       box-sizing: border-box;
       margin-bottom: 10px;
     }
+    .codec-btn {
+      background: #6c757d;
+    }
+    .codec-btn:hover {
+      background: #5a6268;
+    }
+    .codec-btn.codec-active {
+      background: #28a745;
+    }
+    .codec-btn.codec-active:hover {
+      background: #1e7e34;
+    }
   </style>
 </head>
 <body>
@@ -114,6 +126,21 @@
     <div class="error" id="workerWarning" style="display: none;">
       <strong>Warning:</strong> File operations are not working because Web Worker context is unavailable or an error occurred.
     </div>
+  </div>
+
+  <div class="container">
+    <h2>Codec</h2>
+    <div class="info">
+      Choose which implementation encodes/decodes below. Both produce the
+      <strong>identical</strong> binary format, so files written with one codec
+      read back with the other. Encoding/decoding runs on the main thread with
+      the selected codec; the Web Worker only does raw file I/O.
+    </div>
+    <div class="controls">
+      <button id="codecJsBtn" class="codec-btn">JavaScript</button>
+      <button id="codecWasmBtn" class="codec-btn">WebAssembly (C)</button>
+    </div>
+    <div id="codecStatus" class="info">Active codec: JavaScript</div>
   </div>
 
   <div class="container">
@@ -211,9 +238,40 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
   <script type="module">
 
-    import { ObjectId, Pointer, encode, decode } from '/src/binjson.js';
+    import * as jsCodec from '/src/binjson.js';
+    import * as wasmCodec from '/src/binjson-wasm.js';
+
+    // ObjectId/Pointer are the same classes in both modules (the WASM module
+    // re-exports them), so values built here work with either codec.
+    const { ObjectId, Pointer } = jsCodec;
+
+    // --- Codec selection -------------------------------------------------
+    let activeCodec = 'js';
+    let wasmAvailable = false;
+
+    try {
+      await wasmCodec.ready();
+      wasmAvailable = true;
+    } catch (err) {
+      console.error('WASM codec failed to load:', err);
+    }
+
+    function codec() {
+      return activeCodec === 'wasm' ? wasmCodec : jsCodec;
+    }
+    function codecLabel() {
+      return activeCodec === 'wasm' ? 'WebAssembly (C)' : 'JavaScript';
+    }
+    function setCodec(which) {
+      if (which === 'wasm' && !wasmAvailable) return;
+      activeCodec = which;
+      document.getElementById('codecJsBtn').classList.toggle('codec-active', which === 'js');
+      document.getElementById('codecWasmBtn').classList.toggle('codec-active', which === 'wasm');
+      document.getElementById('codecStatus').textContent = `Active codec: ${codecLabel()}`;
+    }
+
     let currentBinary = null;
-    
+
     // Initialize web worker for file operations
     const worker = new Worker('/dist/worker.js');
     let workerMessageId = 0;
@@ -320,20 +378,25 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
       return replaceMarkers(data);
     }
 
-    // Format output with custom serializer for ObjectId and Date
-    function formatOutput(obj) {
-      for (const key in obj) {
-        const value = obj[key];
-        if (value instanceof ObjectId) {
-          obj[key] = `ObjectId("${value.toString()}")`
-        } else if (value instanceof Date) {
-          obj[key] = `Date("${value.toISOString()}")`
-        } else if (value instanceof Pointer) {
-          obj[key] = `Pointer(${value.valueOf()})`
-        }
+    // Recursively render decoded values, showing the rich types explicitly.
+    function toDisplay(value) {
+      if (value instanceof ObjectId) return `ObjectId("${value.toString()}")`;
+      if (value instanceof Pointer) return `Pointer(${value.valueOf()})`;
+      if (value instanceof Date) return `Date("${value.toISOString()}")`;
+      if (value instanceof Uint8Array) {
+        const hex = Array.from(value).map(b => b.toString(16).padStart(2, '0')).join('');
+        return `Binary[${value.length}](${hex})`;
       }
-
-      return JSON.stringify(obj, null, 2);
+      if (Array.isArray(value)) return value.map(toDisplay);
+      if (value && typeof value === 'object') {
+        const out = {};
+        for (const key of Object.keys(value)) out[key] = toDisplay(value[key]);
+        return out;
+      }
+      return value;
+    }
+    function formatOutput(value) {
+      return JSON.stringify(toDisplay(value), null, 2);
     }
 
     function showMessage(elementId, message, type = 'success') {
@@ -349,10 +412,12 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
         const filename = document.getElementById('filename').value || 'demo.bj';
         const jsonInput = document.getElementById('jsonInput').value;
         const data = parseExtendedJSON(jsonInput);
-        const binary = encode(data);
-        
+        const t0 = performance.now();
+        const binary = codec().encode(data);
+        const ms = (performance.now() - t0).toFixed(3);
+
         await callWorker('write', filename, Array.from(binary));
-        showMessage('message', `Successfully wrote ${binary.length} bytes to ${filename}`);
+        showMessage('message', `Wrote ${binary.length} bytes to ${filename} (encoded with ${codecLabel()} in ${ms} ms)`);
         document.getElementById('output').textContent = 'Data written to file successfully!';
       } catch (error) {
         showMessage('message', `Error: ${error.message}`, 'error');
@@ -365,10 +430,17 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
     async function readFile() {
       try {
         const filename = document.getElementById('filename').value || 'demo.bj';
-        const data = await callWorker('read', filename);
-        
-        showMessage('message', `Successfully read data from ${filename}`);
-        document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+        const bytes = await callWorker('read-bytes', filename);
+        if (!bytes || bytes.length === 0) {
+          showMessage('message', `File ${filename} is empty or does not exist`, 'error');
+          return;
+        }
+        const t0 = performance.now();
+        const data = codec().decode(new Uint8Array(bytes));
+        const ms = (performance.now() - t0).toFixed(3);
+
+        showMessage('message', `Read ${bytes.length} bytes from ${filename} (decoded with ${codecLabel()} in ${ms} ms)`);
+        document.getElementById('output').textContent = formatOutput(data);
       } catch (error) {
         showMessage('message', `Error: ${error.message}`, 'error');
         console.error(error);
@@ -382,10 +454,10 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
         const filename = document.getElementById('filename').value || 'demo.bj';
         const jsonInput = document.getElementById('jsonInput').value;
         const data = parseExtendedJSON(jsonInput);
-        const binary = encode(data);
-        
+        const binary = codec().encode(data);
+
         await callWorker('append', filename, Array.from(binary));
-        showMessage('message', `Successfully appended ${binary.length} bytes to ${filename}`);
+        showMessage('message', `Appended ${binary.length} bytes to ${filename} (encoded with ${codecLabel()})`);
         document.getElementById('output').textContent = 'Data appended to file successfully!';
       } catch (error) {
         showMessage('message', `Error: ${error.message}`, 'error');
@@ -398,10 +470,23 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
     async function scanFile() {
       try {
         const filename = document.getElementById('filename').value || 'demo.bj';
-        const records = await callWorker('scan', filename);
-        
-        showMessage('message', `Successfully scanned ${records.length} record(s) from ${filename}`);
-        document.getElementById('output').textContent = JSON.stringify(records, null, 2);
+        const bytes = await callWorker('read-bytes', filename);
+        const buffer = new Uint8Array(bytes || []);
+
+        const c = codec();
+        const records = [];
+        let offset = 0;
+        const t0 = performance.now();
+        while (offset < buffer.length) {
+          const value = c.decode(buffer.subarray(offset));
+          records.push(value);
+          // Values are canonically encoded, so re-encoding gives the byte length.
+          offset += c.encode(value).length;
+        }
+        const ms = (performance.now() - t0).toFixed(3);
+
+        showMessage('message', `Scanned ${records.length} record(s) from ${filename} (decoded with ${codecLabel()} in ${ms} ms)`);
+        document.getElementById('output').textContent = formatOutput(records);
       } catch (error) {
         showMessage('message', `Error: ${error.message}`, 'error');
         console.error(error);
@@ -444,18 +529,20 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
       try {
         const input = document.getElementById('encodeInput').value;
         const data = parseExtendedJSON(input);
-        
-        currentBinary = encode(data);
-        
+
+        const t0 = performance.now();
+        currentBinary = codec().encode(data);
+        const ms = (performance.now() - t0).toFixed(3);
+
         // Convert to hex string for display
         const hexString = Array.from(currentBinary)
           .map(b => b.toString(16).padStart(2, '0'))
           .join(' ');
-        
-        document.getElementById('binaryOutput').textContent = 
+
+        document.getElementById('binaryOutput').textContent =
           `Length: ${currentBinary.length} bytes\n\nHex:\n${hexString}`;
-        
-        showMessage('encodeMessage', 'Successfully encoded data to binary');
+
+        showMessage('encodeMessage', `Encoded to binary with ${codecLabel()} in ${ms} ms`);
       } catch (error) {
         showMessage('encodeMessage', `Error: ${error.message}`, 'error');
         console.error(error);
@@ -471,10 +558,12 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
           return;
         }
         
-        const decoded = decode(currentBinary);
+        const t0 = performance.now();
+        const decoded = codec().decode(currentBinary);
+        const ms = (performance.now() - t0).toFixed(3);
         document.getElementById('decodeOutput').textContent = formatOutput(decoded);
-        
-        showMessage('encodeMessage', 'Successfully decoded binary data');
+
+        showMessage('encodeMessage', `Decoded binary with ${codecLabel()} in ${ms} ms`);
       } catch (error) {
         showMessage('encodeMessage', `Error: ${error.message}`, 'error');
         console.error(error);
@@ -483,15 +572,35 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
     
     document.getElementById('decodeBtn').addEventListener('click', testDecode);
     
-    // Check OPFS support on load
-    window.addEventListener('load', () => {
-      if (!navigator.storage || !navigator.storage.getDirectory) {
-        showMessage('message', 
-          'Origin Private File System (OPFS) is not supported in this browser. Please use Chrome 102+, Edge 102+, or Opera 88+.', 
-          'error'
-        );
+    // Wire up codec selector
+    document.getElementById('codecJsBtn').addEventListener('click', () => setCodec('js'));
+    const wasmBtn = document.getElementById('codecWasmBtn');
+    if (wasmAvailable) {
+      wasmBtn.addEventListener('click', () => setCodec('wasm'));
+    } else {
+      wasmBtn.disabled = true;
+      wasmBtn.textContent = 'WebAssembly (unavailable)';
+    }
+    setCodec('js');
+
+    // Check OPFS support on load; disable file ops with a persistent, clear
+    // message when it is unavailable (the Encode/Decode demo still works).
+    const fileButtonIds = ['writeFileBtn', 'readFileBtn', 'appendToFileBtn', 'scanFileBtn', 'deleteFileBtn', 'checkFileExistsBtn'];
+    function checkOpfsSupport() {
+      const supported = typeof navigator !== 'undefined' && navigator.storage && navigator.storage.getDirectory;
+      if (supported) return;
+      for (const id of fileButtonIds) {
+        const btn = document.getElementById(id);
+        if (btn) btn.disabled = true;
       }
-    });
+      document.getElementById('message').innerHTML =
+        '<div class="error"><strong>File operations are disabled:</strong> the Origin Private File System (OPFS) ' +
+        'is not available here. OPFS requires a <strong>secure context</strong> — open this page via ' +
+        '<code>http://localhost:8080/public/binjson.html</code> (run <code>npm run serve</code>) or over https — ' +
+        'and a supported browser (Chrome/Edge/Opera 102+ or Safari 16.4+). ' +
+        'The Encode/Decode demo below works regardless.</div>';
+    }
+    window.addEventListener('load', checkOpfsSupport);
   </script>
 </body>
 </html>
