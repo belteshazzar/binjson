@@ -125,7 +125,7 @@ export class TextLog {
     // Metadata entries are distinguished by having the exact fields we expect
     let lastMetadata = null;
     
-    for (const entry of this.file.scan()) {
+    for (const { value: entry } of this.file.scan()) {
       // Check if this entry looks like metadata
       if (entry && 
           typeof entry.version !== 'undefined' &&
@@ -252,7 +252,7 @@ export class TextLog {
     let snapshotEntry = null;
     const entries = [];
     
-    for (const entry of this.file.scan()) {
+    for (const { value: entry } of this.file.scan()) {
       // Skip metadata entries (they don't have a 'type' field with our values)
       if (!entry.type || (entry.type !== ENTRY_TYPE.FULL_SNAPSHOT && entry.type !== ENTRY_TYPE.DIFF)) {
         continue;
@@ -325,7 +325,7 @@ export class TextLog {
     let snapshotEntry = null;
     const diffsToApply = [];
     
-    for (const e of this.file.scan()) {
+    for (const { value: e } of this.file.scan()) {
       if (!e.type || (e.type !== ENTRY_TYPE.FULL_SNAPSHOT && e.type !== ENTRY_TYPE.DIFF)) {
         continue;
       }
@@ -427,7 +427,7 @@ export class TextLog {
     }
     
     // Scan through file to find the requested version
-    for (const entry of this.file.scan()) {
+    for (const { value: entry } of this.file.scan()) {
       if (entry.type && entry.version === version) {
         return entry.hash;
       }

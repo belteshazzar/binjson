@@ -1,5 +1,5 @@
 /** Runs the shared BPlusTree compaction suite against the WASM tree. */
-import { ready, BPlusTree } from '../src/bplustree-wasm.js';
+import { ready, BPlusTree } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runBPlusTreeCompactionSuite } from './bplustree.compaction.suite.js';
 

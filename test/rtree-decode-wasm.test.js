@@ -3,7 +3,7 @@
  * The CLI reads with the JS reference RTree, so this proves the WASM on-disk
  * format is byte-compatible with the reference.
  */
-import { ready, RTree } from '../src/rtree-wasm.js';
+import { ready, RTree } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runRTreeDecodeSuite } from './rtree-decode.suite.js';
 

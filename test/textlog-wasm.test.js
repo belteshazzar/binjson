@@ -4,7 +4,7 @@
  * The WASM module loads asynchronously; open() awaits it, but we also await
  * ready() up front so the module is instantiated before the suite registers.
  */
-import { ready, TextLog } from '../src/textlog-wasm.js';
+import { ready, TextLog } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runTextLogSuite } from './textlog.suite.js';
 

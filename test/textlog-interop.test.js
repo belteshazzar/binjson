@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { TextLog as TextLogJS } from '../src/textlog.js';
-import { TextLog as TextLogWasm, ready } from '../src/textlog-wasm.js';
+import { TextLog as TextLogWasm, ready } from '../src/binjson-wasm.js';
 import { BinJsonFile, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -56,7 +56,7 @@ describe.skipIf(!hasOPFS)('TextLog: JS <-> WASM on-disk interop', () => {
     const sync = await fh.createSyncAccessHandle();
     const file = new BinJsonFile(sync);
     const entries = [];
-    for (const rec of file.scan()) {
+    for (const { value: rec } of file.scan()) {
       if (rec && (rec.type === 0x01 || rec.type === 0x02)) {
         entries.push({ type: rec.type, version: rec.version, hash: rec.hash, data: rec.data });
       }

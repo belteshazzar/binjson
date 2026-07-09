@@ -100,18 +100,6 @@
       box-sizing: border-box;
       margin-bottom: 10px;
     }
-    .codec-btn {
-      background: #6c757d;
-    }
-    .codec-btn:hover {
-      background: #5a6268;
-    }
-    .codec-btn.codec-active {
-      background: #28a745;
-    }
-    .codec-btn.codec-active:hover {
-      background: #1e7e34;
-    }
   </style>
 </head>
 <body>
@@ -131,16 +119,11 @@
   <div class="container">
     <h2>Codec</h2>
     <div class="info">
-      Choose which implementation encodes/decodes below. Both produce the
-      <strong>identical</strong> binary format, so files written with one codec
-      read back with the other. Encoding/decoding runs on the main thread with
-      the selected codec; the Web Worker only does raw file I/O.
+      Encoding/decoding runs on the main thread with the
+      <strong>WebAssembly (C)</strong> codec — the C implementation compiled to
+      WASM. The Web Worker only does raw file I/O.
     </div>
-    <div class="controls">
-      <button id="codecJsBtn" class="codec-btn">JavaScript</button>
-      <button id="codecWasmBtn" class="codec-btn">WebAssembly (C)</button>
-    </div>
-    <div id="codecStatus" class="info">Active codec: JavaScript</div>
+    <div id="codecStatus" class="info">Active codec: WebAssembly (C)</div>
   </div>
 
   <div class="container">
@@ -238,42 +221,31 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
 
   <script type="module">
 
-    import * as jsCodec from '/src/binjson.js';
     import * as wasmCodec from '/src/binjson-wasm.js';
 
-    // ObjectId/Pointer are the same classes in both modules (the WASM module
-    // re-exports them), so values built here work with either codec.
-    const { ObjectId, Pointer } = jsCodec;
+    // ObjectId/Pointer are re-exported by the WASM module.
+    const { ObjectId, Pointer } = wasmCodec;
 
-    // --- Codec selection -------------------------------------------------
-    let activeCodec = 'js';
-    let wasmAvailable = false;
-
+    // The WASM codec must be instantiated before any encode/decode.
+    let wasmReady = false;
     try {
       await wasmCodec.ready();
-      wasmAvailable = true;
+      wasmReady = true;
     } catch (err) {
       console.error('WASM codec failed to load:', err);
     }
 
     function codec() {
-      return activeCodec === 'wasm' ? wasmCodec : jsCodec;
+      return wasmCodec;
     }
     function codecLabel() {
-      return activeCodec === 'wasm' ? 'WebAssembly (C)' : 'JavaScript';
-    }
-    function setCodec(which) {
-      if (which === 'wasm' && !wasmAvailable) return;
-      activeCodec = which;
-      document.getElementById('codecJsBtn').classList.toggle('codec-active', which === 'js');
-      document.getElementById('codecWasmBtn').classList.toggle('codec-active', which === 'wasm');
-      document.getElementById('codecStatus').textContent = `Active codec: ${codecLabel()}`;
+      return 'WebAssembly (C)';
     }
 
     let currentBinary = null;
 
     // Initialize web worker for file operations
-    const worker = new Worker('/site/worker.js');
+    const worker = new Worker('/site/worker.js', { type: 'module' });
     let workerMessageId = 0;
     const workerPromises = new Map();
     
@@ -572,16 +544,17 @@ OBJECT:  0x11 (num keys as 32-bit uint + key-value pairs)
     
     document.getElementById('decodeBtn').addEventListener('click', testDecode);
     
-    // Wire up codec selector
-    document.getElementById('codecJsBtn').addEventListener('click', () => setCodec('js'));
-    const wasmBtn = document.getElementById('codecWasmBtn');
-    if (wasmAvailable) {
-      wasmBtn.addEventListener('click', () => setCodec('wasm'));
-    } else {
-      wasmBtn.disabled = true;
-      wasmBtn.textContent = 'WebAssembly (unavailable)';
+    // Encoding/decoding requires the WASM codec. If it failed to load, disable
+    // the operations that need it with a clear message.
+    if (!wasmReady) {
+      for (const id of ['writeFileBtn', 'readFileBtn', 'appendToFileBtn', 'scanFileBtn', 'deleteFileBtn', 'checkFileExistsBtn', 'encodeBtn', 'decodeBtn']) {
+        const btn = document.getElementById(id);
+        if (btn) btn.disabled = true;
+      }
+      document.getElementById('message').innerHTML =
+        '<div class="error"><strong>The WebAssembly codec failed to load.</strong> ' +
+        'Ensure <code>lib/binjson.wasm</code> is served (run <code>npm run serve</code>).</div>';
     }
-    setCodec('js');
 
     // Check OPFS support on load; disable file ops with a persistent, clear
     // message when it is unavailable (the Encode/Decode demo still works).

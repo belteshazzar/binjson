@@ -1,5 +1,5 @@
 /** Runs the shared R-tree node-size suite against the WASM tree. */
-import { ready, RTree } from '../src/rtree-wasm.js';
+import { ready, RTree } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runRTreeNodeSizesSuite } from './rtree.node-sizes.suite.js';
 

@@ -53,7 +53,7 @@ async function cleanupFile(filename) {
 
 function runCli(filePath) {
   return new Promise((resolve, reject) => {
-    execFile('node', ['bin/bplustree-decode.js', filePath], { cwd: process.cwd() }, (error, stdout, stderr) => {
+    execFile('node', ['bin/bplustree.js', filePath], { cwd: process.cwd() }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout;
         error.stderr = stderr;

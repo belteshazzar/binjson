@@ -492,7 +492,7 @@ export function runFileSuite(label, codec, hasOPFS) {
       file.flush();
 
       const records = [];
-      for (const record of file.scan()) records.push(record);
+      for (const { value: record } of file.scan()) records.push(record);
 
       expect(records).toHaveLength(2);
       expect(records[0].id).toBe(1);

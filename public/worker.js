@@ -1,10 +1,21 @@
 // Web Worker for handling OPFS file operations with sync access handles
 // This worker handles file operations that require FileSystemSyncAccessHandle
 
-import { encode, decode, getFileHandle, deleteFile, ObjectId } from '../src/binjson.js';
-import { BPlusTree } from '../src/bplustree.js';
-import { RTree } from '../src/rtree.js';
-import { TextIndex } from '../src/textindex.js';
+// All data structures and the codec are backed by the single combined WASM
+// module, loaded once via ../src/binjson-wasm.js (which pulls in
+// ../lib/binjson.wasm). The on-disk format is identical to the pure-JS
+// reference, so files written either way remain interoperable.
+import {
+  ready,
+  decode,
+  valueSize,
+  getFileHandle,
+  ObjectId,
+  BPlusTree,
+  RTree,
+  TextIndex,
+  TextLog
+} from '../src/binjson-wasm.js';
 
 // Resolve the OPFS root, with a clear error when it isn't available. OPFS is
 // only exposed in a secure context (https or http://localhost) and in browsers
@@ -17,6 +28,20 @@ async function getRootDir() {
     );
   }
   return navigator.storage.getDirectory();
+}
+
+// A TextIndex is backed by three B+ tree files sharing a base name. Open all
+// three and wrap them in a TextIndex (create the files when `create` is true).
+async function openTextIndex(dirHandle, baseName, create) {
+  const roles = { index: '-terms.bj', documentTerms: '-documents.bj', documentLengths: '-lengths.bj' };
+  const trees = {};
+  for (const [role, suffix] of Object.entries(roles)) {
+    const fh = await getFileHandle(dirHandle, `${baseName}${suffix}`, { create });
+    trees[role] = new BPlusTree(await fh.createSyncAccessHandle(), 16);
+  }
+  const index = new TextIndex({ trees });
+  await index.open();
+  return index;
 }
 
 // Helper function to read all data from sync handle
@@ -35,8 +60,12 @@ self.addEventListener('message', async (event) => {
   const { id, operation, filename, data } = event.data;
   
   try {
+    // Ensure the WASM module is instantiated before any decode/valueSize call
+    // or tree operation. Idempotent and cached, so this is cheap per message.
+    await ready();
+
     let result;
-    
+
     switch (operation) {
       case 'write': {
         const dirHandle = await getRootDir();
@@ -104,24 +133,22 @@ self.addEventListener('message', async (event) => {
         
         const buffer = readAllData(syncHandle);
         const records = [];
-        
+
+        // Walk the concatenated records using the WASM codec's exact on-wire
+        // size for each value (the header needs at most the type byte plus a
+        // 4-byte length field), rather than re-encoding to guess the length.
         let offset = 0;
         while (offset < buffer.length) {
           try {
-            const view = new DataView(buffer.buffer, buffer.byteOffset + offset);
-            const decoded = decode(new Uint8Array(buffer.buffer, buffer.byteOffset + offset));
-            records.push(decoded);
-            
-            // Estimate how many bytes were read (simple heuristic)
-            // This is a simplified version - a more robust implementation would
-            // need to track the actual bytes consumed by decode
-            const reencoded = encode(decoded);
-            offset += reencoded.length;
+            const header = buffer.subarray(offset, offset + Math.min(5, buffer.length - offset));
+            const size = valueSize(header);
+            records.push(decode(buffer.subarray(offset, offset + size)));
+            offset += size;
           } catch (err) {
             break; // End of valid data
           }
         }
-        
+
         await syncHandle.close();
         result = records;
         break;
@@ -193,11 +220,72 @@ self.addEventListener('message', async (event) => {
         await tree.open();
         const array = await tree.toArray();
         await tree.close();
-        
+
         result = array;
         break;
       }
-      
+
+      case 'bplustree-search': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const { key } = data;
+        const tree = new BPlusTree(syncHandle);
+        await tree.open();
+        const value = await tree.search(key);
+        await tree.close();
+
+        // `undefined` means the key is absent; distinguish it from a stored null.
+        result = { found: value !== undefined, value: value === undefined ? null : value };
+        break;
+      }
+
+      case 'bplustree-delete': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const { key } = data;
+        const tree = new BPlusTree(syncHandle);
+        await tree.open();
+        const existed = (await tree.search(key)) !== undefined;
+        await tree.delete(key);
+        await tree.close();
+
+        result = { deleted: existed };
+        break;
+      }
+
+      case 'bplustree-range': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const { min, max } = data;
+        const tree = new BPlusTree(syncHandle);
+        await tree.open();
+        const entries = await tree.rangeSearch(min, max);
+        await tree.close();
+
+        result = entries;
+        break;
+      }
+
+      case 'bplustree-info': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const tree = new BPlusTree(syncHandle);
+        await tree.open();
+        const info = { size: tree.size(), height: tree.getHeight(), order: tree.order };
+        await tree.close();
+
+        result = info;
+        break;
+      }
+
       case 'bplustree-compact': {
         const dirHandle = await getRootDir();
         const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
@@ -295,11 +383,71 @@ self.addEventListener('message', async (event) => {
         await tree.open();
         const stats = await tree.compact(destSyncHandle);
         await tree.close();
-        
+
         result = stats;
         break;
       }
-      
+
+      case 'rtree-remove': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const { objectId } = data;
+        const oid = typeof objectId === 'string' ? new ObjectId(objectId) : objectId;
+        const tree = new RTree(syncHandle);
+        await tree.open();
+        const removed = await tree.remove(oid);
+        await tree.close();
+
+        result = { removed };
+        break;
+      }
+
+      case 'rtree-clear': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const tree = new RTree(syncHandle);
+        await tree.open();
+        const count = tree.size();
+        await tree.clear();
+        await tree.close();
+
+        result = { cleared: count };
+        break;
+      }
+
+      case 'rtree-list': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const tree = new RTree(syncHandle);
+        await tree.open();
+        // A whole-world bounding box returns every point.
+        const points = await tree.searchBBox({ minLat: -90, maxLat: 90, minLng: -180, maxLng: 180 });
+        await tree.close();
+
+        result = points;
+        break;
+      }
+
+      case 'rtree-info': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const tree = new RTree(syncHandle);
+        await tree.open();
+        const info = { size: tree.size(), maxEntries: tree.maxEntries };
+        await tree.close();
+
+        result = info;
+        break;
+      }
+
       case 'textindex-create': {
         const dirHandle = await getRootDir();
         const { baseName, order } = data;
@@ -448,11 +596,148 @@ self.addEventListener('message', async (event) => {
           documentTerms: compactDocTermsTree,
           documentLengths: compactDocLengthsTree
         });
-        
+
         result = stats;
         break;
       }
-      
+
+      case 'textindex-info': {
+        const dirHandle = await getRootDir();
+        const { baseName } = data;
+        const textIndex = await openTextIndex(dirHandle, baseName, false);
+        const info = { terms: await textIndex.getTermCount(), documents: await textIndex.getDocumentCount() };
+        await textIndex.close();
+
+        result = info;
+        break;
+      }
+
+      case 'textindex-remove': {
+        const dirHandle = await getRootDir();
+        const { baseName, docId } = data;
+        const textIndex = await openTextIndex(dirHandle, baseName, false);
+        const removed = await textIndex.remove(docId);
+        await textIndex.close();
+
+        result = { removed };
+        break;
+      }
+
+      case 'textindex-clear': {
+        const dirHandle = await getRootDir();
+        const { baseName } = data;
+        const textIndex = await openTextIndex(dirHandle, baseName, false);
+        const count = await textIndex.getDocumentCount();
+        await textIndex.clear();
+        await textIndex.close();
+
+        result = { cleared: count };
+        break;
+      }
+
+      case 'textindex-list': {
+        const dirHandle = await getRootDir();
+        const { baseName } = data;
+        const textIndex = await openTextIndex(dirHandle, baseName, false);
+        // Document ids are the keys of the documentTerms tree.
+        const ids = textIndex.documentTerms.toArray().map((e) => e.key);
+        await textIndex.close();
+
+        result = ids;
+        break;
+      }
+
+      case 'textlog-create': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: true });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const diffsPerSnapshot = data?.diffsPerSnapshot || 10;
+        const log = new TextLog(syncHandle, diffsPerSnapshot);
+        await log.open();
+        await log.close();
+
+        result = { success: true };
+        break;
+      }
+
+      case 'textlog-add': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: true });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const { text, diffsPerSnapshot } = data;
+        const log = new TextLog(syncHandle, diffsPerSnapshot || 10);
+        await log.open();
+        const version = await log.addVersion(text);
+        await log.close();
+
+        result = { version };
+        break;
+      }
+
+      case 'textlog-get': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const { version } = data;
+        const log = new TextLog(syncHandle);
+        await log.open();
+        const text = await log.getVersion(version);
+        await log.close();
+
+        result = { version, text };
+        break;
+      }
+
+      case 'textlog-diff': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const { from, to } = data;
+        const log = new TextLog(syncHandle);
+        await log.open();
+        const diff = await log.getDiff(from, to);
+        await log.close();
+
+        result = { from, to, diff };
+        break;
+      }
+
+      case 'textlog-info': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const log = new TextLog(syncHandle);
+        await log.open();
+        const info = { versions: log.getCurrentVersion(), diffsPerSnapshot: log.diffsPerSnapshot };
+        await log.close();
+
+        result = info;
+        break;
+      }
+
+      case 'textlog-list': {
+        const dirHandle = await getRootDir();
+        const fileHandle = await getFileHandle(dirHandle, filename, { create: false });
+        const syncHandle = await fileHandle.createSyncAccessHandle();
+
+        const log = new TextLog(syncHandle);
+        await log.open();
+        const current = log.getCurrentVersion();
+        const versions = [];
+        for (let v = 1; v <= current; v++) {
+          versions.push({ version: v, hash: await log.getVersionHash(v) });
+        }
+        await log.close();
+
+        result = versions;
+        break;
+      }
+
       default:
         throw new Error(`Unknown operation: ${operation}`);
     }

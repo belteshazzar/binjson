@@ -10,7 +10,7 @@ import { deleteFile, getFileHandle, ObjectId } from '../src/binjson.js';
 
 function runCli(filePath) {
   return new Promise((resolve, reject) => {
-    execFile('node', ['bin/rtree-decode.js', filePath], { cwd: process.cwd() }, (error, stdout, stderr) => {
+    execFile('node', ['bin/rtree.js', filePath], { cwd: process.cwd() }, (error, stdout, stderr) => {
       if (error) {
         error.stdout = stdout;
         error.stderr = stderr;

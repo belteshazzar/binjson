@@ -3,6 +3,10 @@ import commonjs from '@rollup/plugin-commonjs';
 
 export default {
   input: 'public/worker.js',
+  // The bundle pulls in the combined WASM loader (lib/binjson.wasm.mjs). Its
+  // Node branch does `import('node:module')` etc., which a browser Web Worker
+  // never executes — keep those built-ins external so they aren't bundled.
+  external: [/^node:/],
   output: {
     file: 'site/worker.js',
     format: 'es'

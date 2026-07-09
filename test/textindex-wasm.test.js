@@ -4,7 +4,7 @@
  * The WASM module loads asynchronously; the trees' open() awaits it, but we also
  * await ready() up front so the module is instantiated before the suite runs.
  */
-import { ready, TextIndex, BPlusTree } from '../src/textindex-wasm.js';
+import { ready, TextIndex, BPlusTree } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runTextIndexSuite } from './textindex.suite.js';
 

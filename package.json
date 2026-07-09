@@ -8,26 +8,32 @@
     ".": "./src/binjson.js",
     "./wasm": "./src/binjson-wasm.js",
     "./bplustree": "./src/bplustree.js",
-    "./bplustree-wasm": "./src/bplustree-wasm.js",
+    "./bplustree-wasm": "./src/binjson-wasm.js",
     "./rtree": "./src/rtree.js",
-    "./rtree-wasm": "./src/rtree-wasm.js",
+    "./rtree-wasm": "./src/binjson-wasm.js",
     "./textindex": "./src/textindex.js",
     "./textlog": "./src/textlog.js"
   },
   "bin": {
-    "binjson-decode": "bin/binjson-decode.js"
+    "binjson": "bin/binjson.js",
+    "binjson-decode": "bin/binjson.js",
+    "bplustree": "bin/bplustree.js",
+    "rtree": "bin/rtree.js",
+    "textindex": "bin/textindex.js",
+    "textlog": "bin/textlog.js"
   },
   "files": [
     "src",
     "bin",
-    "lib"
+    "lib",
+    "c"
   ],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
-    "build:worker": "rollup -c rollup.config.js",
+    "build:worker": "rollup -c rollup.config.js && cp lib/binjson.wasm site/binjson.wasm",
     "build:wasm": "./c/build-wasm.sh",
     "prepack": "npm run build:wasm",
     "test:wasm": "node c/test-wasm.mjs",

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Build the WASM modules with Emscripten. Each component <name> produces
-# lib/<name>.wasm.mjs (the ES module loader) + lib/<name>.wasm (the binary),
-# loaded by src/<name>-wasm.js via ../lib. Requires `emcc` on PATH (emsdk).
+# Build a single combined WASM module with Emscripten. All C sources
+# (binjson, bplustree, diff, rtree, stemmer, textindex, textlog) are linked into
+# one binary, lib/binjson.wasm + lib/binjson.wasm.mjs (the ES module loader),
+# which every src/*-wasm.js wrapper loads via ../lib. Requires `emcc` on PATH
+# (emsdk).
 set -euo pipefail
 
 # Output into lib/ (gitignored). These generated artifacts are shipped with the
@@ -40,66 +42,46 @@ build_module() {
   echo "built lib/$name.wasm.mjs ($(wc -c < "lib/$name.wasm") bytes wasm)"
 }
 
-BJ_EXPORTS='_malloc,_free,'\
+# Union of every component's exported functions. _malloc/_free and the bptw_*
+# glue (shared by bplustree and textindex) appear once.
+ALL_EXPORTS='_malloc,_free,'\
+`# binjson`\
 '_bjw_enc_reset,_bjw_put_null,_bjw_put_bool,_bjw_put_int,_bjw_put_float,'\
 '_bjw_put_date,_bjw_put_pointer,_bjw_put_string,_bjw_put_binary,_bjw_put_oid,'\
 '_bjw_put_key,_bjw_begin_array,_bjw_end_array,_bjw_begin_object,_bjw_end_object,'\
 '_bjw_enc_finish,_bjw_enc_ptr,_bjw_enc_size,'\
-'_bjw_decode,_bjw_events_ptr,_bjw_events_len,_bjw_consumed,_bjw_value_size'
-
-build_module binjson createBinjsonModule "$BJ_EXPORTS" \
-  c/binjson.c c/binjson_wasm.c
-
-BPT_EXPORTS='_malloc,_free,'\
-'_bptw_create,_bptw_load,_bptw_free,'\
-'_bptw_add,_bptw_delete,_bptw_search,_bptw_entries,_bptw_range,_bptw_height,'\
-'_bptw_size,_bptw_root,_bptw_next_id,_bptw_order,'\
-'_bptw_out_ptr,_bptw_out_len,_bptw_image_ptr,_bptw_image_len'
-
-build_module bplustree createBplustreeModule "$BPT_EXPORTS" \
-  c/binjson.c c/bplustree.c c/bplustree_wasm.c
-
-RT_EXPORTS='_malloc,_free,'\
-'_rtw_create,_rtw_load,_rtw_free,'\
-'_rtw_insert,_rtw_remove,_rtw_clear,_rtw_search,_rtw_search_radius,_rtw_haversine,_rtw_compact,'\
-'_rtw_size,_rtw_max_entries,'\
-'_rtw_out_ptr,_rtw_out_len,_rtw_image_ptr,_rtw_image_len'
-
-build_module rtree createRtreeModule "$RT_EXPORTS" \
-  c/binjson.c c/geo.c c/rtree.c c/rtree_wasm.c
-
-TL_EXPORTS='_malloc,_free,'\
-'_tlw_create,_tlw_load,_tlw_free,'\
-'_tlw_add_version,_tlw_get_version,_tlw_get_version_hash,_tlw_get_diff,'\
-'_tlw_version,_tlw_diffs_per_snapshot,'\
-'_tlw_out_ptr,_tlw_out_len,_tlw_image_ptr,_tlw_image_len'
-
-build_module textlog createTextlogModule "$TL_EXPORTS" \
-  c/binjson.c c/diff.c c/textlog.c c/textlog_wasm.c
-
-# Standalone diff engine (jsdiff port) for the browser demo (public/diff.html)
-# and src/diff-wasm.js. diff.c has no other dependencies.
-DF_EXPORTS='_malloc,_free,_diff_create_patch,_diff_get_diff,_diff_apply_patch'
-
-build_module diff createDiffModule "$DF_EXPORTS" \
-  c/diff.c
-
-# Standalone Porter stemmer (stemmer@2.0.1 port) for src/stemmer-wasm.js and the
-# textindex WASM port. stemmer.c has no other dependencies.
-ST_EXPORTS='_malloc,_free,_stemmer_stem'
-
-build_module stemmer createStemmerModule "$ST_EXPORTS" \
-  c/stemmer.c
-
-# Full-text index: textindex.c on top of the B+ tree, binjson and stemmer ports.
-# Exports the bplustree glue too, so the JS shim can manage the three tree files.
-TI_EXPORTS='_malloc,_free,'\
+'_bjw_decode,_bjw_events_ptr,_bjw_events_len,_bjw_consumed,_bjw_value_size,'\
+`# bplustree (also used by textindex)`\
 '_bptw_create,_bptw_load,_bptw_free,'\
 '_bptw_add,_bptw_delete,_bptw_search,_bptw_entries,_bptw_range,_bptw_height,'\
 '_bptw_size,_bptw_root,_bptw_next_id,_bptw_order,'\
 '_bptw_out_ptr,_bptw_out_len,_bptw_image_ptr,_bptw_image_len,'\
+`# rtree`\
+'_rtw_create,_rtw_load,_rtw_free,'\
+'_rtw_insert,_rtw_remove,_rtw_clear,_rtw_search,_rtw_search_radius,_rtw_haversine,_rtw_compact,'\
+'_rtw_size,_rtw_max_entries,'\
+'_rtw_out_ptr,_rtw_out_len,_rtw_image_ptr,_rtw_image_len,'\
+`# textlog`\
+'_tlw_create,_tlw_load,_tlw_free,'\
+'_tlw_add_version,_tlw_get_version,_tlw_get_version_hash,_tlw_get_diff,'\
+'_tlw_version,_tlw_diffs_per_snapshot,'\
+'_tlw_out_ptr,_tlw_out_len,_tlw_image_ptr,_tlw_image_len,'\
+`# diff`\
+'_diff_create_patch,_diff_get_diff,_diff_apply_patch,'\
+`# stemmer`\
+'_stemmer_stem,'\
+`# textindex`\
 '_tixw_add,_tixw_remove,_tixw_clear,_tixw_query,_tixw_query_all,'\
 '_tixw_out_ptr,_tixw_out_len'
 
-build_module textindex createTextindexModule "$TI_EXPORTS" \
-  c/binjson.c c/bplustree.c c/bplustree_wasm.c c/stemmer.c c/textindex.c c/textindex_wasm.c
+# Every C source, each listed once. c/test_binjson.c is a native test harness
+# with its own main() and is deliberately excluded.
+ALL_SOURCES=(
+  c/binjson.c c/binjson_wasm.c
+  c/bplustree.c c/bplustree_wasm.c
+  c/geo.c c/rtree.c c/rtree_wasm.c
+  c/diff.c c/textlog.c c/textlog_wasm.c
+  c/stemmer.c c/textindex.c c/textindex_wasm.c
+)
+
+build_module binjson createBinjsonModule "$ALL_EXPORTS" "${ALL_SOURCES[@]}"

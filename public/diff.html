@@ -79,7 +79,7 @@
   <header>
     <h1>Diff, running in WebAssembly</h1>
     <p>Edit either version — the middle column is the unified diff, computed live by the C
-       port of <code>diff</code> (jsdiff) compiled to WASM (<code>c/diff.c</code> → <code>src/diff-wasm.js</code>).</p>
+       port of <code>diff</code> (jsdiff) compiled to WASM (<code>c/diff.c</code> → <code>src/binjson-wasm.js</code>).</p>
   </header>
 
   <div class="cols">
@@ -100,7 +100,7 @@
   <div class="notice" id="notice" hidden></div>
 
   <script type="module">
-    import { ready, unifiedDiff } from '/src/diff-wasm.js';
+    import { ready, unifiedDiff } from '/src/binjson-wasm.js';
 
     const $a = document.getElementById('a');
     const $b = document.getElementById('b');

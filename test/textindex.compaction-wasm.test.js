@@ -1,5 +1,5 @@
 /** Runs the shared TextIndex compaction suite against the WASM implementation. */
-import { ready, TextIndex, BPlusTree } from '../src/textindex-wasm.js';
+import { ready, TextIndex, BPlusTree } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runTextIndexCompactionSuite } from './textindex.compaction.suite.js';
 

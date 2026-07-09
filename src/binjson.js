@@ -651,7 +651,9 @@ class BinJsonFile {
 
   /**
    * Generator to scan through all records in the file
-   * Each record is decoded and yielded one at a time
+   * Each record is decoded and yielded one at a time as
+   * `{ value, offset, size }`, where `offset` is the record's byte position in
+   * the file and `size` is the number of bytes it occupies.
    */
   *scan() {
     const fileSize = this.getFileSize();
@@ -725,13 +727,14 @@ class BinJsonFile {
         
         // Determine size of the current value
         const valueSize = getValueSize(offset);
-        
+
         // Read only the bytes needed for this value
         const valueData = this.#readRange(offset, valueSize);
+        const valueOffset = offset;
         offset += valueSize;
-        
-        // Decode and yield this value
-        yield decode(valueData);
+
+        // Decode and yield this value along with its byte position and size
+        yield { value: decode(valueData), offset: valueOffset, size: valueSize };
       }
   }
 }

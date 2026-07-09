@@ -1,14 +1,18 @@
 /**
- * WASM-backed binjson codec.
+ * WASM-backed binjson — the single loader for the combined WebAssembly module.
  *
- * Drop-in for the encode/decode of src/binjson.js, delegating the byte-level
- * work to the C codec compiled to WebAssembly (see c/binjson_wasm.c). The value
- * types (ObjectId, Pointer) and the OPFS layer (BinJsonFile, exists, ...) are
- * re-exported unchanged from src/binjson.js — the wire format is identical, so
- * the two codecs interoperate freely.
+ * Every C component (binjson, bplustree, diff, rtree, stemmer, textindex,
+ * textlog) is linked into one binary, lib/binjson.wasm (see c/build-wasm.sh).
+ * This module instantiates that binary once (via `ready()`), exposes it through
+ * a shared `Module` handle, and wraps it in the full JS API: the binjson codec
+ * (encode/decode/valueSize) and BinJsonFile, plus BPlusTree, RTree, TextLog,
+ * TextIndex, the Porter stemmer, and the diff engine. The value types
+ * (ObjectId, Pointer) and the rest of the OPFS layer are re-exported unchanged
+ * from src/binjson.js — the wire format is identical, so this codec and the
+ * pure-JS reference interoperate freely.
  *
- * The WASM module loads asynchronously; call and await `ready()` once before
- * using the synchronous encode/decode (e.g. at worker startup).
+ * The WASM module loads asynchronously; call and await `ready()` once (the tree
+ * classes' open() does this for you) before using the synchronous codec.
  */
 import createBinjsonModule from '../lib/binjson.wasm.mjs';
 import {
@@ -251,6 +255,18 @@ function wasmValueSize(M, header) {
 }
 
 /**
+ * On-wire size (in bytes) of the top-level value whose leading bytes are
+ * `header`, computed by the C codec. `header` only needs the type byte plus,
+ * for length-prefixed/container types, the 4-byte size field (i.e. up to 5
+ * bytes). Await ready() before calling. Useful for scanning append-only files
+ * of concatenated records without decoding each one.
+ */
+function valueSize(header) {
+  const M = requireModule();
+  return wasmValueSize(M, header instanceof Uint8Array ? header : new Uint8Array(header));
+}
+
+/**
  * OPFS-backed file using a FileSystemSyncAccessHandle, with the binjson codec
  * running in WASM. Byte-level work (encode/decode + scan record sizing) is done
  * in C; only the raw synchronous handle calls (read/write/truncate/getSize/
@@ -310,7 +326,11 @@ class BinJsonFile {
     this.syncAccessHandle.flush();
   }
 
-  /** Yield each top-level record in the file, decoded one at a time. */
+  /**
+   * Yield each top-level record in the file, decoded one at a time as
+   * `{ value, offset, size }`, where `offset` is the record's byte position in
+   * the file and `size` is the number of bytes it occupies.
+   */
   *scan() {
     const fileSize = this.getFileSize();
     if (fileSize === 0) return;
@@ -324,9 +344,975 @@ class BinJsonFile {
       const valueSize = wasmValueSize(M, header);
 
       const valueData = this.#readRange(offset, valueSize);
+      const valueOffset = offset;
       offset += valueSize;
-      yield decode(valueData);
+      yield { value: decode(valueData), offset: valueOffset, size: valueSize };
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers for the tree/index/log/diff/stemmer wrappers below.
+// ---------------------------------------------------------------------------
+
+// Aliases so the copied wrappers can keep using their original names.
+const encoder = textEncoder;
+const decoder = textDecoder;
+
+/** Copy a JS string into the heap as UTF-8; returns { ptr, len, free }. */
+function allocStr(M, str) {
+  const bytes = textEncoder.encode(str);
+  const len = bytes.length;
+  const ptr = M._malloc(len || 1);
+  if (len) M.HEAPU8.set(bytes, ptr);
+  return { ptr, len, free() { M._free(ptr); } };
+}
+
+/** Little-endian u32 read from the heap (HEAPU32 isn't exported). */
+function readU32(M, addr) {
+  const b = M.HEAPU8;
+  return (b[addr] | (b[addr + 1] << 8) | (b[addr + 2] << 16) | (b[addr + 3] * 0x1000000)) >>> 0;
+}
+
+/** Copy a JS string into the heap as UTF-8; returns { ptr, len }. */
+function writeBytes(M, str) {
+  const bytes = encoder.encode(str);
+  const ptr = M._malloc(bytes.length || 1);
+  if (bytes.length) M.HEAPU8.set(bytes, ptr);
+  return { ptr, len: bytes.length };
+}
+
+/** Copy a JS string into the heap as a NUL-terminated C string; returns ptr. */
+function writeCString(M, str) {
+  const bytes = encoder.encode(str);
+  const ptr = M._malloc(bytes.length + 1);
+  if (bytes.length) M.HEAPU8.set(bytes, ptr);
+  M.HEAPU8[ptr + bytes.length] = 0;
+  return ptr;
+}
+
+/**
+ * Read a (uint8_t** out, size_t* outlen) result the C side malloc'd, decode it
+ * as UTF-8, and free the C buffer. `outPP`/`outLP` are heap slots holding the
+ * pointer and length.
+ */
+function takeOut(M, outPP, outLP) {
+  const outPtr = readU32(M, outPP);
+  const outLen = readU32(M, outLP);
+  const bytes = M.HEAPU8.slice(outPtr, outPtr + outLen);
+  if (outPtr) M._free(outPtr);
+  return decoder.decode(bytes);
+}
+
+// ---------------------------------------------------------------------------
+// B+ tree
+// ---------------------------------------------------------------------------
+
+/**
+ * Persistent immutable B+ tree with append-only WASM-backed storage.
+ * Mirrors the API of src/bplustree.js.
+ */
+class BPlusTree {
+  /**
+   * @param {FileSystemSyncAccessHandle} syncHandle - storage file handle
+   * @param {number} order - tree order (default 3, minimum 3)
+   *
+   * The tree is durable: every add/delete writes its appended bytes straight
+   * through to the file handle (matching the write-through model of
+   * src/bplustree.js), so data survives a crash before close().
+   */
+  constructor(syncHandle, order = 3) {
+    if (order < 3) {
+      throw new Error('B+ tree order must be at least 3');
+    }
+    this.syncAccessHandle = syncHandle;
+    this.order = order;
+    this.isOpen = false;
+    this.ctx = 0;
+    this._size = 0;
+    this._flushedLen = 0; // image bytes already written to the handle
+  }
+
+  /** Open the tree: load an existing file image or initialize a new one. */
+  async open() {
+    if (this.isOpen) {
+      throw new Error('Tree is already open');
+    }
+    const M = await ready();
+
+    const fileSize = this.syncAccessHandle.getSize();
+    if (fileSize > 0) {
+      const buf = new Uint8Array(fileSize);
+      this.syncAccessHandle.read(buf, { at: 0 });
+      const ptr = M._malloc(fileSize);
+      M.HEAPU8.set(buf, ptr);
+      this.ctx = M._bptw_load(ptr, fileSize);
+      M._free(ptr);
+      if (!this.ctx) throw new Error('Invalid tree file');
+      this.order = M._bptw_order(this.ctx);
+      this._flushedLen = fileSize; // existing bytes are already on disk
+    } else {
+      this.ctx = M._bptw_create(this.order);
+      if (!this.ctx) throw new Error('Failed to create B+ tree');
+      this._flushedLen = 0;
+    }
+    this._size = M._bptw_size(this.ctx);
+    this.isOpen = true;
+    // Persist the freshly-created root + metadata immediately, as the reference
+    // does in _initializeNewTree.
+    this._writeThrough();
+  }
+
+  /**
+   * Append the image bytes not yet on disk to the file handle (no fsync). The
+   * image is append-only, so only the tail past _flushedLen is ever new.
+   */
+  _writeThrough() {
+    const M = requireModule();
+    const len = M._bptw_image_len(this.ctx);
+    if (len > this._flushedLen) {
+      const ptr = M._bptw_image_ptr(this.ctx);
+      const chunk = M.HEAPU8.slice(ptr + this._flushedLen, ptr + len);
+      this.syncAccessHandle.write(chunk, { at: this._flushedLen });
+      this._flushedLen = len;
+    }
+  }
+
+  /** Persist any pending image bytes to the sync handle and fsync. */
+  flush() {
+    this._writeThrough();
+    this.syncAccessHandle.flush();
+  }
+
+  /** Flush appended bytes after C-side mutations (via the tix* functions). */
+  syncAfter() { this._writeThrough(); }
+
+  /** Persist, close the sync handle, and release the WASM context. */
+  async close() {
+    if (!this.isOpen) return;
+    if (this.syncAccessHandle) {
+      this.flush();
+      await this.syncAccessHandle.close();
+    }
+    if (this.ctx) {
+      Module._bptw_free(this.ctx);
+      this.ctx = 0;
+    }
+    this.isOpen = false;
+  }
+
+  /** Allocate a marshalled key; caller must call .free(). */
+  #allocKey(key) {
+    const M = Module;
+    if (typeof key === 'number') {
+      return { type: 0, num: key, ptr: 0, len: 0, free() {} };
+    }
+    if (typeof key === 'string') {
+      const bytes = textEncoder.encode(key);
+      const len = bytes.length;
+      const ptr = len ? M._malloc(len) : 0;
+      if (len) M.HEAPU8.set(bytes, ptr);
+      return { type: 1, num: 0, ptr, len, free() { if (len) M._free(ptr); } };
+    }
+    throw new Error(`Unsupported key type: ${typeof key}`);
+  }
+
+  /** Insert or update a key-value pair. */
+  add(key, value) {
+    const M = requireModule();
+    const k = this.#allocKey(key);
+    const vbytes = encode(value);
+    const vlen = vbytes.length;
+    const vptr = vlen ? M._malloc(vlen) : 0;
+    if (vlen) M.HEAPU8.set(vbytes, vptr);
+    try {
+      const rc = M._bptw_add(this.ctx, k.type, k.num, k.ptr, k.len, vptr, vlen);
+      if (rc !== 0) throw codeError(rc, 'add');
+      this._size = M._bptw_size(this.ctx);
+      this._writeThrough();
+    } finally {
+      k.free();
+      if (vlen) M._free(vptr);
+    }
+  }
+
+  /** Search for a key; returns the value or undefined. */
+  search(key) {
+    const M = requireModule();
+    const k = this.#allocKey(key);
+    try {
+      const rc = M._bptw_search(this.ctx, k.type, k.num, k.ptr, k.len);
+      if (rc < 0) throw codeError(rc, 'search');
+      if (rc === 0) return undefined;
+      const ptr = M._bptw_out_ptr();
+      const len = M._bptw_out_len();
+      return decode(M.HEAPU8.slice(ptr, ptr + len));
+    } finally {
+      k.free();
+    }
+  }
+
+  /** Delete a key (no-op if absent). */
+  delete(key) {
+    const M = requireModule();
+    const k = this.#allocKey(key);
+    try {
+      const rc = M._bptw_delete(this.ctx, k.type, k.num, k.ptr, k.len);
+      if (rc !== 0) throw codeError(rc, 'delete');
+      this._size = M._bptw_size(this.ctx);
+      this._writeThrough();
+    } finally {
+      k.free();
+    }
+  }
+
+  /** All entries as an array of { key, value } in sorted order. */
+  toArray() {
+    const M = requireModule();
+    const rc = M._bptw_entries(this.ctx);
+    if (rc !== 0) throw codeError(rc, 'toArray');
+    const ptr = M._bptw_out_ptr();
+    const len = M._bptw_out_len();
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
+  /** Entries with min <= key <= max, in sorted order. */
+  rangeSearch(minKey, maxKey) {
+    const M = requireModule();
+    const kmin = this.#allocKey(minKey);
+    const kmax = this.#allocKey(maxKey);
+    try {
+      const rc = M._bptw_range(
+        this.ctx,
+        kmin.type, kmin.num, kmin.ptr, kmin.len,
+        kmax.type, kmax.num, kmax.ptr, kmax.len
+      );
+      if (rc !== 0) throw codeError(rc, 'rangeSearch');
+      const ptr = M._bptw_out_ptr();
+      const len = M._bptw_out_len();
+      return decode(M.HEAPU8.slice(ptr, ptr + len));
+    } finally {
+      kmin.free();
+      kmax.free();
+    }
+  }
+
+  /** Async iterator over { key, value } entries in sorted order. */
+  async *[Symbol.asyncIterator]() {
+    if (!this.isOpen) {
+      throw new Error('Tree must be open before iteration');
+    }
+    if (this.size() === 0) return;
+    for (const entry of this.toArray()) {
+      yield entry;
+    }
+  }
+
+  /** Tree height (0 for a single leaf). */
+  getHeight() {
+    const M = requireModule();
+    const h = M._bptw_height(this.ctx);
+    if (h < 0) throw codeError(h, 'getHeight');
+    return h;
+  }
+
+  size() {
+    return requireModule()._bptw_size(this.ctx);
+  }
+
+  isEmpty() {
+    return this.size() === 0;
+  }
+
+  /**
+   * Compact into a fresh file, dropping stale append-only history.
+   * @param {FileSystemSyncAccessHandle} destSyncHandle
+   * @returns {Promise<{oldSize:number,newSize:number,bytesSaved:number}>}
+   */
+  async compact(destSyncHandle) {
+    if (!this.isOpen) {
+      throw new Error('Tree file is not open');
+    }
+    if (!destSyncHandle) {
+      throw new Error('Destination sync handle is required for compaction');
+    }
+    const M = requireModule();
+    const oldSize = M._bptw_image_len(this.ctx);
+
+    const entries = this.toArray();
+    const newTree = new BPlusTree(destSyncHandle, this.order);
+    await newTree.open();
+    for (const entry of entries) {
+      newTree.add(entry.key, entry.value);
+    }
+    const newSize = M._bptw_image_len(newTree.ctx);
+    await newTree.close();
+
+    return {
+      oldSize,
+      newSize,
+      bytesSaved: Math.max(0, oldSize - newSize)
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// R-tree
+// ---------------------------------------------------------------------------
+
+/**
+ * Haversine distance in kilometers, computed by the WASM libm (c/geo.c).
+ * Requires the module to be instantiated — call ready() (or open() a tree)
+ * first.
+ */
+function haversineDistance(lat1, lng1, lat2, lng2) {
+  return requireModule()._rtw_haversine(lat1, lng1, lat2, lng2);
+}
+
+/**
+ * Persistent on-disk R-tree with append-only WASM-backed storage.
+ * Mirrors the API of src/rtree.js.
+ */
+class RTree {
+  /**
+   * @param {FileSystemSyncAccessHandle} syncHandle - storage file handle
+   * @param {number} maxEntries - node capacity (default 9, minimum 2)
+   *
+   * The tree is durable: every mutation writes its appended bytes straight
+   * through to the file handle (matching the write-through model of
+   * src/rtree.js), so data survives a crash before close().
+   */
+  constructor(syncHandle, maxEntries = 9) {
+    this.syncAccessHandle = syncHandle;
+    this.maxEntries = maxEntries;
+    this.isOpen = false;
+    this.ctx = 0;
+    this._size = 0;
+    this._flushedLen = 0; // image bytes already written to the handle
+
+    // Shim exposing file size, used by some tests (tree.file.getFileSize()).
+    this.file = {
+      getFileSize: () => (this.ctx ? Module._rtw_image_len(this.ctx)
+                                   : this.syncAccessHandle.getSize())
+    };
+  }
+
+  /** Open the tree: load an existing file image or initialize a new one. */
+  async open() {
+    if (this.isOpen) {
+      throw new Error('R-tree is already open');
+    }
+    const M = await ready();
+
+    const fileSize = this.syncAccessHandle.getSize();
+    if (fileSize > 0) {
+      const buf = new Uint8Array(fileSize);
+      this.syncAccessHandle.read(buf, { at: 0 });
+      const ptr = M._malloc(fileSize);
+      M.HEAPU8.set(buf, ptr);
+      this.ctx = M._rtw_load(ptr, fileSize);
+      M._free(ptr);
+      if (!this.ctx) throw new Error('Invalid R-tree file');
+      this.maxEntries = M._rtw_max_entries(this.ctx);
+      this._flushedLen = fileSize; // existing bytes are already on disk
+    } else {
+      this.ctx = M._rtw_create(this.maxEntries);
+      if (!this.ctx) throw new Error('Failed to create R-tree');
+      this._flushedLen = 0;
+    }
+    this._size = M._rtw_size(this.ctx);
+    this.isOpen = true;
+    // Persist the freshly-created root + metadata immediately, as the reference
+    // does in _initializeNewTree.
+    this._writeThrough();
+  }
+
+  /**
+   * Append the image bytes not yet on disk to the file handle (no fsync). The
+   * image is append-only, so only the tail past _flushedLen is ever new.
+   */
+  _writeThrough() {
+    const M = requireModule();
+    const len = M._rtw_image_len(this.ctx);
+    if (len > this._flushedLen) {
+      const ptr = M._rtw_image_ptr(this.ctx);
+      const chunk = M.HEAPU8.slice(ptr + this._flushedLen, ptr + len);
+      this.syncAccessHandle.write(chunk, { at: this._flushedLen });
+      this._flushedLen = len;
+    }
+  }
+
+  /** Persist any pending image bytes to the sync handle and fsync. */
+  flush() {
+    this._writeThrough();
+    this.syncAccessHandle.flush();
+  }
+
+  /** Persist, close the sync handle, and release the WASM context. */
+  async close() {
+    if (!this.isOpen) return;
+    if (this.syncAccessHandle) {
+      this.flush();
+      await this.syncAccessHandle.close();
+    }
+    if (this.ctx) {
+      Module._rtw_free(this.ctx);
+      this.ctx = 0;
+    }
+    this.isOpen = false;
+  }
+
+  /** Insert a point (lat, lng) associated with an ObjectId. */
+  insert(lat, lng, objectId) {
+    if (!this.isOpen) {
+      throw new Error('R-tree file must be opened before use');
+    }
+    if (!(objectId instanceof ObjectId)) {
+      throw new Error('objectId must be an instance of ObjectId to insert into rtree');
+    }
+    const M = requireModule();
+    const bytes = objectId.toBytes();
+    const ptr = M._malloc(12);
+    M.HEAPU8.set(bytes, ptr);
+    try {
+      const rc = M._rtw_insert(this.ctx, lat, lng, ptr);
+      if (rc !== 0) throw codeError(rc, 'insert');
+      this._size = M._rtw_size(this.ctx);
+      this._writeThrough();
+    } finally {
+      M._free(ptr);
+    }
+  }
+
+  /** Remove the entry for an ObjectId. Returns true if one was removed. */
+  remove(objectId) {
+    if (!this.isOpen) {
+      throw new Error('R-tree file must be opened before use');
+    }
+    if (!(objectId instanceof ObjectId)) {
+      throw new Error('objectId must be an instance of ObjectId to remove from rtree');
+    }
+    const M = requireModule();
+    const bytes = objectId.toBytes();
+    const ptr = M._malloc(12);
+    M.HEAPU8.set(bytes, ptr);
+    try {
+      const rc = M._rtw_remove(this.ctx, ptr);
+      if (rc < 0) throw codeError(rc, 'remove');
+      this._size = M._rtw_size(this.ctx);
+      this._writeThrough();
+      return rc === 1;
+    } finally {
+      M._free(ptr);
+    }
+  }
+
+  /** Candidate entries whose point falls inside a bounding box. */
+  _searchBBoxRaw(bbox) {
+    const M = requireModule();
+    const rc = M._rtw_search(this.ctx, bbox.minLat, bbox.maxLat, bbox.minLng, bbox.maxLng);
+    if (rc !== 0) throw codeError(rc, 'searchBBox');
+    const ptr = M._rtw_out_ptr(this.ctx);
+    const len = M._rtw_out_len(this.ctx);
+    if (len === 0) return [];
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
+  /** Search for points within a bounding box; returns { objectId, lat, lng }. */
+  searchBBox(bbox) {
+    if (!this.isOpen) {
+      throw new Error('R-tree file must be opened before use');
+    }
+    return this._searchBBoxRaw(bbox);
+  }
+
+  /**
+   * Search for points within a radius (km) of a location; returns
+   * { objectId, lat, lng, distance }. The radius-to-bbox conversion, tree
+   * traversal and haversine distance filter all run in C (c/geo.c + rtree.c).
+   */
+  searchRadius(lat, lng, radiusKm) {
+    if (!this.isOpen) {
+      throw new Error('R-tree file must be opened before use');
+    }
+    const M = requireModule();
+    const rc = M._rtw_search_radius(this.ctx, lat, lng, radiusKm);
+    if (rc !== 0) throw codeError(rc, 'searchRadius');
+    const ptr = M._rtw_out_ptr(this.ctx);
+    const len = M._rtw_out_len(this.ctx);
+    if (len === 0) return [];
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
+  /** Drop all entries by appending a fresh empty root. */
+  async clear() {
+    const M = requireModule();
+    const rc = M._rtw_clear(this.ctx);
+    if (rc !== 0) throw codeError(rc, 'clear');
+    this._size = 0;
+    this._writeThrough();
+  }
+
+  size() {
+    return this._size;
+  }
+
+  isEmpty() {
+    return this._size === 0;
+  }
+
+  /**
+   * Compact into a fresh file, dropping stale append-only history.
+   * @param {FileSystemSyncAccessHandle} destSyncHandle
+   * @returns {Promise<{oldSize:number,newSize:number,bytesSaved:number}>}
+   */
+  async compact(destSyncHandle) {
+    if (!this.isOpen) {
+      throw new Error('R-tree file must be opened before use');
+    }
+    if (!destSyncHandle) {
+      throw new Error('Destination sync handle is required for compaction');
+    }
+    const M = requireModule();
+    const oldSize = M._rtw_image_len(this.ctx);
+
+    const rc = M._rtw_compact(this.ctx);
+    if (rc !== 0) throw codeError(rc, 'compact');
+    const ptr = M._rtw_out_ptr(this.ctx);
+    const newSize = M._rtw_out_len(this.ctx);
+    const bytes = M.HEAPU8.slice(ptr, ptr + newSize);
+
+    destSyncHandle.truncate(0);
+    destSyncHandle.write(bytes, { at: 0 });
+    destSyncHandle.flush();
+    await destSyncHandle.close();
+
+    return {
+      oldSize,
+      newSize,
+      bytesSaved: Math.max(0, oldSize - newSize)
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Text versioning log
+// ---------------------------------------------------------------------------
+
+/**
+ * Persistent versioned text log with append-only WASM-backed storage.
+ * Mirrors the API of src/textlog.js.
+ */
+class TextLog {
+  /**
+   * @param {FileSystemSyncAccessHandle} syncHandle - storage file handle
+   * @param {number} diffsPerSnapshot - diffs between full snapshots (default 10)
+   */
+  constructor(syncHandle, diffsPerSnapshot = 10) {
+    if (diffsPerSnapshot < 1) {
+      throw new Error('diffsPerSnapshot must be at least 1');
+    }
+    this.syncAccessHandle = syncHandle;
+    this.diffsPerSnapshot = diffsPerSnapshot;
+    this.isOpen = false;
+    this.ctx = 0;
+    this.version = 0;
+    this._flushedLen = 0; // image bytes already written to the handle
+
+    // Shim mirroring the reference's `file` member (used by some tests).
+    this.file = {
+      syncAccessHandle: syncHandle,
+      getFileSize: () => (this.ctx ? Module._tlw_image_len(this.ctx)
+                                   : this.syncAccessHandle.getSize())
+    };
+  }
+
+  /** Open the log: load an existing file image or initialize a new one. */
+  async open() {
+    if (this.isOpen) {
+      throw new Error('TextLog is already open');
+    }
+    const M = await ready();
+
+    const fileSize = this.syncAccessHandle.getSize();
+    if (fileSize > 0) {
+      const buf = new Uint8Array(fileSize);
+      this.syncAccessHandle.read(buf, { at: 0 });
+      const ptr = M._malloc(fileSize);
+      M.HEAPU8.set(buf, ptr);
+      this.ctx = M._tlw_load(ptr, fileSize);
+      M._free(ptr);
+      if (!this.ctx) {
+        throw new Error('Failed to read metadata: no valid metadata found');
+      }
+      this.diffsPerSnapshot = M._tlw_diffs_per_snapshot(this.ctx);
+      this._flushedLen = fileSize; // existing bytes are already on disk
+    } else {
+      this.ctx = M._tlw_create(this.diffsPerSnapshot);
+      if (!this.ctx) throw new Error('Failed to create TextLog');
+      this._flushedLen = 0;
+    }
+    this.version = M._tlw_version(this.ctx);
+    this.isOpen = true;
+    // Persist the freshly-created metadata immediately, as the reference does
+    // in _initializeNewLog.
+    this._writeThrough();
+  }
+
+  /**
+   * Append the image bytes not yet on disk to the file handle (no fsync). The
+   * image is append-only, so only the tail past _flushedLen is ever new.
+   */
+  _writeThrough() {
+    const M = requireModule();
+    const len = M._tlw_image_len(this.ctx);
+    if (len > this._flushedLen) {
+      const ptr = M._tlw_image_ptr(this.ctx);
+      const chunk = M.HEAPU8.slice(ptr + this._flushedLen, ptr + len);
+      this.syncAccessHandle.write(chunk, { at: this._flushedLen });
+      this._flushedLen = len;
+    }
+  }
+
+  /** Persist any pending image bytes to the sync handle and fsync. */
+  flush() {
+    this._writeThrough();
+    this.syncAccessHandle.flush();
+  }
+
+  /** Persist, close the sync handle, and release the WASM context. */
+  async close() {
+    if (!this.isOpen) return;
+    if (this.syncAccessHandle) {
+      this.flush();
+      await this.syncAccessHandle.close();
+    }
+    if (this.ctx) {
+      Module._tlw_free(this.ctx);
+      this.ctx = 0;
+    }
+    this.isOpen = false;
+  }
+
+  /** Read the current output buffer as a UTF-8 string. */
+  _readOut(M) {
+    const ptr = M._tlw_out_ptr(this.ctx);
+    const len = M._tlw_out_len(this.ctx);
+    if (len === 0) return '';
+    return decoder.decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
+  /**
+   * Add a new version of the text.
+   * @param {string} text - full text content for this version
+   * @returns {number} the new version number
+   */
+  async addVersion(text) {
+    if (!this.isOpen) {
+      throw new Error('TextLog is not open');
+    }
+    if (typeof text !== 'string') {
+      throw new Error('Text must be a string');
+    }
+    const M = requireModule();
+    const bytes = encoder.encode(text);
+    const ptr = M._malloc(bytes.length || 1);
+    if (bytes.length) M.HEAPU8.set(bytes, ptr);
+    try {
+      const v = M._tlw_add_version(this.ctx, ptr, bytes.length, Date.now());
+      if (v < 0) throw codeError(v, 'addVersion');
+      this.version = v;
+      this._writeThrough();
+      return v;
+    } finally {
+      M._free(ptr);
+    }
+  }
+
+  /**
+   * Get the full text at a specific version.
+   * @param {number} version - version number to retrieve
+   * @returns {string} the text at that version
+   */
+  async getVersion(version) {
+    if (!this.isOpen) {
+      throw new Error('TextLog is not open');
+    }
+    if (version < 1 || version > this.version) {
+      throw new Error(`Invalid version: ${version}. Valid range: 1-${this.version}`);
+    }
+    const M = requireModule();
+    const rc = M._tlw_get_version(this.ctx, version);
+    if (rc !== 0) throw codeError(rc, 'getVersion');
+    return this._readOut(M);
+  }
+
+  /**
+   * Get a human-readable diff between two versions.
+   * @param {number} fromVersion - starting version
+   * @param {number} toVersion - ending version
+   * @returns {string} human-readable unified diff
+   */
+  async getDiff(fromVersion, toVersion) {
+    if (!this.isOpen) {
+      throw new Error('TextLog is not open');
+    }
+    if (fromVersion < 1 || fromVersion > this.version) {
+      throw new Error(`Invalid fromVersion: ${fromVersion}. Valid range: 1-${this.version}`);
+    }
+    if (toVersion < 1 || toVersion > this.version) {
+      throw new Error(`Invalid toVersion: ${toVersion}. Valid range: 1-${this.version}`);
+    }
+    const M = requireModule();
+    const rc = M._tlw_get_diff(this.ctx, fromVersion, toVersion);
+    if (rc !== 0) throw codeError(rc, 'getDiff');
+    return this._readOut(M);
+  }
+
+  /** Get current version number. */
+  getCurrentVersion() {
+    return this.version;
+  }
+
+  /**
+   * Get the SHA-256 hash of a specific version.
+   * @param {number} version - version number
+   * @returns {string} hex string hash
+   */
+  async getVersionHash(version) {
+    if (!this.isOpen) {
+      throw new Error('TextLog is not open');
+    }
+    if (version < 1 || version > this.version) {
+      throw new Error(`Invalid version: ${version}. Valid range: 1-${this.version}`);
+    }
+    const M = requireModule();
+    const rc = M._tlw_get_version_hash(this.ctx, version);
+    if (rc !== 0) throw codeError(rc, 'getVersionHash');
+    return this._readOut(M);
+  }
+}
+
+// Entry type constants (mirror src/textlog.js).
+const ENTRY_TYPE = {
+  FULL_SNAPSHOT: 0x01,
+  DIFF: 0x02
+};
+
+// ---------------------------------------------------------------------------
+// Full-text index
+// ---------------------------------------------------------------------------
+
+/**
+ * WASM full-text index. Mirrors the API of src/textindex.js.
+ */
+class TextIndex {
+  constructor(options = {}) {
+    const { order = 16, trees } = options;
+    this.order = order;
+    this.index = trees?.index || null;
+    this.documentTerms = trees?.documentTerms || null;
+    this.documentLengths = trees?.documentLengths || null;
+    this.isOpen = false;
+  }
+
+  async open() {
+    if (this.isOpen) throw new Error('TextIndex is already open');
+    if (!this.index || !this.documentTerms || !this.documentLengths) {
+      throw new Error('Trees must be initialized before opening');
+    }
+    await Promise.all([this.index.open(), this.documentTerms.open(), this.documentLengths.open()]);
+    this.isOpen = true;
+  }
+
+  async close() {
+    if (!this.isOpen) return;
+    await Promise.all([this.index.close(), this.documentTerms.close(), this.documentLengths.close()]);
+    this.isOpen = false;
+  }
+
+  _ensureOpen() {
+    if (!this.isOpen) throw new Error('TextIndex is not open');
+  }
+
+  _ctxs() {
+    return [this.index.ctx, this.documentTerms.ctx, this.documentLengths.ctx];
+  }
+
+  _syncAll() {
+    this.index.syncAfter();
+    this.documentTerms.syncAfter();
+    this.documentLengths.syncAfter();
+  }
+
+  async add(docId, text) {
+    this._ensureOpen();
+    if (!docId) throw new Error('Document ID is required');
+    const M = requireModule();
+    const t = typeof text === 'string' ? text : '';
+    const d = allocStr(M, docId);
+    const x = allocStr(M, t);
+    try {
+      const [ix, dt, dl] = this._ctxs();
+      const rc = M._tixw_add(ix, dt, dl, d.ptr, d.len, x.ptr, x.len);
+      if (rc !== 0) throw codeError(rc, 'add');
+      this._syncAll();
+    } finally {
+      d.free(); x.free();
+    }
+  }
+
+  async remove(docId) {
+    this._ensureOpen();
+    const M = requireModule();
+    const d = allocStr(M, String(docId));
+    try {
+      const [ix, dt, dl] = this._ctxs();
+      const rc = M._tixw_remove(ix, dt, dl, d.ptr, d.len);
+      if (rc < 0) throw codeError(rc, 'remove');
+      this._syncAll();
+      return rc === 1;
+    } finally {
+      d.free();
+    }
+  }
+
+  _readOut(M) {
+    const ptr = M._tixw_out_ptr();
+    const len = M._tixw_out_len();
+    if (len === 0) return [];
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
+  async query(queryText, options = { scored: true, requireAll: false }) {
+    this._ensureOpen();
+    const M = requireModule();
+    const q = allocStr(M, typeof queryText === 'string' ? queryText : '');
+    try {
+      const [ix, dt, dl] = this._ctxs();
+      if (options.requireAll) {
+        const rc = M._tixw_query_all(ix, dt, dl, q.ptr, q.len);
+        if (rc !== 0) throw codeError(rc, 'query');
+        return this._readOut(M); // array of id strings
+      }
+      const rc = M._tixw_query(ix, dt, dl, q.ptr, q.len);
+      if (rc !== 0) throw codeError(rc, 'query');
+      const results = this._readOut(M); // array of { id, score }
+      if (options.scored === false) return results.map(r => r.id);
+      return results;
+    } finally {
+      q.free();
+    }
+  }
+
+  async getTermCount() {
+    this._ensureOpen();
+    return this.index.size();
+  }
+
+  async getDocumentCount() {
+    this._ensureOpen();
+    return this.documentTerms.size();
+  }
+
+  async clear() {
+    this._ensureOpen();
+    const M = requireModule();
+    const [ix, dt, dl] = this._ctxs();
+    const rc = M._tixw_clear(ix, dt, dl);
+    if (rc !== 0) throw codeError(rc, 'clear');
+    this._syncAll();
+  }
+
+  async compact({ index: destIndex, documentTerms: destDocTerms, documentLengths: destDocLengths }) {
+    this._ensureOpen();
+    if (!destIndex || !destDocTerms || !destDocLengths) {
+      throw new Error('Destination trees must be provided for compaction');
+    }
+    const terms = await this.index.compact(destIndex.syncAccessHandle);
+    const documents = await this.documentTerms.compact(destDocTerms.syncAccessHandle);
+    const lengths = await this.documentLengths.compact(destDocLengths.syncAccessHandle);
+    await this.close();
+    this.isOpen = false;
+    return { terms, documents, lengths };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Porter stemmer
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the Porter stem of `value`. Matches stemmer@2.0.1 byte-for-byte for
+ * ASCII words. Requires the module to be instantiated (await ready()).
+ */
+function stemmer(value) {
+  const M = requireModule();
+  const bytes = encoder.encode(String(value));
+  const len = bytes.length;
+  // Worst case the stem length equals the input; +2 for a possible appended
+  // 'e'/'i' and the NUL terminator the C side writes.
+  const inPtr = M._malloc(len || 1);
+  const outPtr = M._malloc(len + 2);
+  try {
+    if (len) M.HEAPU8.set(bytes, inPtr);
+    const outLen = M._stemmer_stem(inPtr, len, outPtr);
+    return decoder.decode(M.HEAPU8.slice(outPtr, outPtr + outLen));
+  } finally {
+    M._free(inPtr);
+    M._free(outPtr);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Diff engine
+// ---------------------------------------------------------------------------
+
+/** createPatch(fileName, a, b) — full unified diff with INCLUDE_HEADERS. */
+function createPatch(fileName, a, b) {
+  const M = requireModule();
+  const namePtr = writeCString(M, fileName);
+  const A = writeBytes(M, a), B = writeBytes(M, b);
+  const outPP = M._malloc(4), outLP = M._malloc(4);
+  try {
+    const rc = M._diff_create_patch(namePtr, A.ptr, A.len, B.ptr, B.len, outPP, outLP);
+    if (rc !== 0) throw new Error(`createPatch failed (${rc})`);
+    return takeOut(M, outPP, outLP);
+  } finally {
+    M._free(namePtr); M._free(A.ptr); M._free(B.ptr); M._free(outPP); M._free(outLP);
+  }
+}
+
+/**
+ * The unified diff textlog.js's getDiff renders: `--- <fromLabel>` / `+++
+ * <toLabel>` headers followed by `@@`/context/`+`/`-` lines. Labels default to
+ * matching textlog's `version 1` / `version 2`.
+ */
+function unifiedDiff(a, b, fromLabel = 1, toLabel = 2) {
+  const M = requireModule();
+  const A = writeBytes(M, a), B = writeBytes(M, b);
+  const outPP = M._malloc(4), outLP = M._malloc(4);
+  try {
+    const rc = M._diff_get_diff(fromLabel | 0, toLabel | 0, A.ptr, A.len, B.ptr, B.len, outPP, outLP);
+    if (rc !== 0) throw new Error(`unifiedDiff failed (${rc})`);
+    return takeOut(M, outPP, outLP);
+  } finally {
+    M._free(A.ptr); M._free(B.ptr); M._free(outPP); M._free(outLP);
+  }
+}
+
+/** applyPatch(source, patch) — returns the patched string, or null if it doesn't fit. */
+function applyPatch(source, patch) {
+  const M = requireModule();
+  const S = writeBytes(M, source), P = writeBytes(M, patch);
+  const outPP = M._malloc(4), outLP = M._malloc(4), appliedP = M._malloc(4);
+  try {
+    const rc = M._diff_apply_patch(S.ptr, S.len, P.ptr, P.len, outPP, outLP, appliedP);
+    if (rc !== 0) throw new Error(`applyPatch failed (${rc})`);
+    if (readU32(M, appliedP) === 0) return null;
+    return takeOut(M, outPP, outLP);
+  } finally {
+    M._free(S.ptr); M._free(P.ptr); M._free(outPP); M._free(outLP); M._free(appliedP);
   }
 }
 
@@ -338,8 +1324,19 @@ export {
   Pointer,
   encode,
   decode,
+  valueSize,
   BinJsonFile,
   exists,
   deleteFile,
-  getFileHandle
+  getFileHandle,
+  BPlusTree,
+  RTree,
+  haversineDistance,
+  TextLog,
+  ENTRY_TYPE,
+  TextIndex,
+  stemmer,
+  createPatch,
+  unifiedDiff,
+  applyPatch
 };

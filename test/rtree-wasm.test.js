@@ -4,7 +4,7 @@
  * The WASM module loads asynchronously; open() awaits it, but we also await
  * ready() up front so the module is instantiated before the suite registers.
  */
-import { ready, RTree } from '../src/rtree-wasm.js';
+import { ready, RTree } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runRTreeSuite } from './rtree.suite.js';
 

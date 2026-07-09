@@ -1,7 +1,7 @@
 /**
  * B+ tree parity + durability + performance benchmark:
  *   - pure-JS   src/bplustree.js       (write-through per op)
- *   - WASM      src/bplustree-wasm.js   (write-through per op)
+ *   - WASM      src/binjson-wasm.js     (write-through per op)
  *
  * Both are durable: every mutation is persisted before it returns.
  *
@@ -18,7 +18,7 @@ import { navigator as nodeNavigator } from 'node-opfs';
 Object.defineProperty(global, 'navigator', { value: nodeNavigator, writable: true, configurable: true });
 
 import { BPlusTree as JsTree } from '../src/bplustree.js';
-import { ready as wasmReady, BPlusTree as WasmTree } from '../src/bplustree-wasm.js';
+import { ready as wasmReady, BPlusTree as WasmTree } from '../src/binjson-wasm.js';
 import { getFileHandle, deleteFile } from '../src/binjson.js';
 
 await wasmReady();

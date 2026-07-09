@@ -4,7 +4,7 @@
  * The WASM module loads asynchronously; open() awaits it, but we also await
  * ready() up front so the module is instantiated before the suite registers.
  */
-import { ready, BPlusTree } from '../src/bplustree-wasm.js';
+import { ready, BPlusTree } from '../src/binjson-wasm.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 import { runBPlusTreeSuite } from './bplustree.suite.js';
 

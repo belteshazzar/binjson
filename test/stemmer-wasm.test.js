@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { stemmer as jsStemmer } from 'stemmer';
-import { ready, stemmer as wasmStemmer } from '../src/stemmer-wasm.js';
+import { ready, stemmer as wasmStemmer } from '../src/binjson-wasm.js';
 
 // Words chosen to exercise steps 1a–5, the y-handling, *v*/*o conditions and
 // the suffix tables (many are the canonical examples from Porter's paper).
