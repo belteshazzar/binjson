@@ -1,6 +1,6 @@
 {
   "name": "@belteshazzar/binjson",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "A compact binary encoding format for JSON data with support for Origin Private File System (OPFS) in browsers",
   "main": "src/binjson.js",
   "type": "module",
