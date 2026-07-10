@@ -359,6 +359,29 @@ class BinJsonFile {
 const encoder = textEncoder;
 const decoder = textDecoder;
 
+/**
+ * Host I/O registry for the file-resident C structures (c/hostio.c).
+ *
+ * Each open FileSystemSyncAccessHandle is registered under an integer slot in
+ * `Module.bjioHandles`; the C side reads and writes the file through EM_JS
+ * imports that index this table and pass HEAPU8 subarray views straight to the
+ * handle's synchronous read/write — the bytes move directly between the file
+ * and WASM memory with no intermediate copies, and no copy of the file is ever
+ * held in memory on either side of the bridge.
+ */
+let nextBjioFd = 1;
+
+function registerHandle(M, syncHandle) {
+  if (!M.bjioHandles) M.bjioHandles = {};
+  const fd = nextBjioFd++;
+  M.bjioHandles[fd] = syncHandle;
+  return fd;
+}
+
+function unregisterHandle(M, fd) {
+  if (M.bjioHandles) delete M.bjioHandles[fd];
+}
+
 /** Copy a JS string into the heap as UTF-8; returns { ptr, len, free }. */
 function allocStr(M, str) {
   const bytes = textEncoder.encode(str);
@@ -429,65 +452,48 @@ class BPlusTree {
     this.order = order;
     this.isOpen = false;
     this.ctx = 0;
+    this._fd = 0;
     this._size = 0;
-    this._flushedLen = 0; // image bytes already written to the handle
   }
 
-  /** Open the tree: load an existing file image or initialize a new one. */
+  /**
+   * Open the tree against the file handle. The C side is file-resident: it
+   * reads nodes from the handle on demand and writes each mutation's records
+   * straight through, so nothing is buffered here and data survives a crash
+   * before close() (matching the model of src/bplustree.js).
+   */
   async open() {
     if (this.isOpen) {
       throw new Error('Tree is already open');
     }
     const M = await ready();
 
+    this._fd = registerHandle(M, this.syncAccessHandle);
     const fileSize = this.syncAccessHandle.getSize();
     if (fileSize > 0) {
-      const buf = new Uint8Array(fileSize);
-      this.syncAccessHandle.read(buf, { at: 0 });
-      const ptr = M._malloc(fileSize);
-      M.HEAPU8.set(buf, ptr);
-      this.ctx = M._bptw_load(ptr, fileSize);
-      M._free(ptr);
-      if (!this.ctx) throw new Error('Invalid tree file');
+      this.ctx = M._bptw_open(this._fd);
+      if (!this.ctx) {
+        unregisterHandle(M, this._fd);
+        throw new Error('Invalid tree file');
+      }
       this.order = M._bptw_order(this.ctx);
-      this._flushedLen = fileSize; // existing bytes are already on disk
     } else {
-      this.ctx = M._bptw_create(this.order);
-      if (!this.ctx) throw new Error('Failed to create B+ tree');
-      this._flushedLen = 0;
+      this.ctx = M._bptw_create(this._fd, this.order);
+      if (!this.ctx) {
+        unregisterHandle(M, this._fd);
+        throw new Error('Failed to create B+ tree');
+      }
     }
     this._size = M._bptw_size(this.ctx);
     this.isOpen = true;
-    // Persist the freshly-created root + metadata immediately, as the reference
-    // does in _initializeNewTree.
-    this._writeThrough();
   }
 
-  /**
-   * Append the image bytes not yet on disk to the file handle (no fsync). The
-   * image is append-only, so only the tail past _flushedLen is ever new.
-   */
-  _writeThrough() {
-    const M = requireModule();
-    const len = M._bptw_image_len(this.ctx);
-    if (len > this._flushedLen) {
-      const ptr = M._bptw_image_ptr(this.ctx);
-      const chunk = M.HEAPU8.slice(ptr + this._flushedLen, ptr + len);
-      this.syncAccessHandle.write(chunk, { at: this._flushedLen });
-      this._flushedLen = len;
-    }
-  }
-
-  /** Persist any pending image bytes to the sync handle and fsync. */
+  /** fsync the file handle (all writes are already on it). */
   flush() {
-    this._writeThrough();
     this.syncAccessHandle.flush();
   }
 
-  /** Flush appended bytes after C-side mutations (via the tix* functions). */
-  syncAfter() { this._writeThrough(); }
-
-  /** Persist, close the sync handle, and release the WASM context. */
+  /** Close the sync handle and release the WASM context. */
   async close() {
     if (!this.isOpen) return;
     if (this.syncAccessHandle) {
@@ -498,6 +504,8 @@ class BPlusTree {
       Module._bptw_free(this.ctx);
       this.ctx = 0;
     }
+    unregisterHandle(Module, this._fd);
+    this._fd = 0;
     this.isOpen = false;
   }
 
@@ -529,7 +537,6 @@ class BPlusTree {
       const rc = M._bptw_add(this.ctx, k.type, k.num, k.ptr, k.len, vptr, vlen);
       if (rc !== 0) throw codeError(rc, 'add');
       this._size = M._bptw_size(this.ctx);
-      this._writeThrough();
     } finally {
       k.free();
       if (vlen) M._free(vptr);
@@ -560,7 +567,6 @@ class BPlusTree {
       const rc = M._bptw_delete(this.ctx, k.type, k.num, k.ptr, k.len);
       if (rc !== 0) throw codeError(rc, 'delete');
       this._size = M._bptw_size(this.ctx);
-      this._writeThrough();
     } finally {
       k.free();
     }
@@ -636,8 +642,7 @@ class BPlusTree {
     if (!destSyncHandle) {
       throw new Error('Destination sync handle is required for compaction');
     }
-    const M = requireModule();
-    const oldSize = M._bptw_image_len(this.ctx);
+    const oldSize = this.syncAccessHandle.getSize();
 
     const entries = this.toArray();
     const newTree = new BPlusTree(destSyncHandle, this.order);
@@ -645,7 +650,7 @@ class BPlusTree {
     for (const entry of entries) {
       newTree.add(entry.key, entry.value);
     }
-    const newSize = M._bptw_image_len(newTree.ctx);
+    const newSize = destSyncHandle.getSize();
     await newTree.close();
 
     return {
@@ -687,68 +692,52 @@ class RTree {
     this.maxEntries = maxEntries;
     this.isOpen = false;
     this.ctx = 0;
+    this._fd = 0;
     this._size = 0;
-    this._flushedLen = 0; // image bytes already written to the handle
 
     // Shim exposing file size, used by some tests (tree.file.getFileSize()).
     this.file = {
-      getFileSize: () => (this.ctx ? Module._rtw_image_len(this.ctx)
-                                   : this.syncAccessHandle.getSize())
+      getFileSize: () => this.syncAccessHandle.getSize()
     };
   }
 
-  /** Open the tree: load an existing file image or initialize a new one. */
+  /**
+   * Open the tree against the file handle. The C side is file-resident: it
+   * reads nodes from the handle on demand and writes each mutation's records
+   * straight through (matching the model of src/rtree.js).
+   */
   async open() {
     if (this.isOpen) {
       throw new Error('R-tree is already open');
     }
     const M = await ready();
 
+    this._fd = registerHandle(M, this.syncAccessHandle);
     const fileSize = this.syncAccessHandle.getSize();
     if (fileSize > 0) {
-      const buf = new Uint8Array(fileSize);
-      this.syncAccessHandle.read(buf, { at: 0 });
-      const ptr = M._malloc(fileSize);
-      M.HEAPU8.set(buf, ptr);
-      this.ctx = M._rtw_load(ptr, fileSize);
-      M._free(ptr);
-      if (!this.ctx) throw new Error('Invalid R-tree file');
+      this.ctx = M._rtw_open(this._fd);
+      if (!this.ctx) {
+        unregisterHandle(M, this._fd);
+        throw new Error('Invalid R-tree file');
+      }
       this.maxEntries = M._rtw_max_entries(this.ctx);
-      this._flushedLen = fileSize; // existing bytes are already on disk
     } else {
-      this.ctx = M._rtw_create(this.maxEntries);
-      if (!this.ctx) throw new Error('Failed to create R-tree');
-      this._flushedLen = 0;
+      this.ctx = M._rtw_create(this._fd, this.maxEntries);
+      if (!this.ctx) {
+        unregisterHandle(M, this._fd);
+        throw new Error('Failed to create R-tree');
+      }
     }
     this._size = M._rtw_size(this.ctx);
     this.isOpen = true;
-    // Persist the freshly-created root + metadata immediately, as the reference
-    // does in _initializeNewTree.
-    this._writeThrough();
   }
 
-  /**
-   * Append the image bytes not yet on disk to the file handle (no fsync). The
-   * image is append-only, so only the tail past _flushedLen is ever new.
-   */
-  _writeThrough() {
-    const M = requireModule();
-    const len = M._rtw_image_len(this.ctx);
-    if (len > this._flushedLen) {
-      const ptr = M._rtw_image_ptr(this.ctx);
-      const chunk = M.HEAPU8.slice(ptr + this._flushedLen, ptr + len);
-      this.syncAccessHandle.write(chunk, { at: this._flushedLen });
-      this._flushedLen = len;
-    }
-  }
-
-  /** Persist any pending image bytes to the sync handle and fsync. */
+  /** fsync the file handle (all writes are already on it). */
   flush() {
-    this._writeThrough();
     this.syncAccessHandle.flush();
   }
 
-  /** Persist, close the sync handle, and release the WASM context. */
+  /** Close the sync handle and release the WASM context. */
   async close() {
     if (!this.isOpen) return;
     if (this.syncAccessHandle) {
@@ -759,6 +748,8 @@ class RTree {
       Module._rtw_free(this.ctx);
       this.ctx = 0;
     }
+    unregisterHandle(Module, this._fd);
+    this._fd = 0;
     this.isOpen = false;
   }
 
@@ -778,7 +769,6 @@ class RTree {
       const rc = M._rtw_insert(this.ctx, lat, lng, ptr);
       if (rc !== 0) throw codeError(rc, 'insert');
       this._size = M._rtw_size(this.ctx);
-      this._writeThrough();
     } finally {
       M._free(ptr);
     }
@@ -800,7 +790,6 @@ class RTree {
       const rc = M._rtw_remove(this.ctx, ptr);
       if (rc < 0) throw codeError(rc, 'remove');
       this._size = M._rtw_size(this.ctx);
-      this._writeThrough();
       return rc === 1;
     } finally {
       M._free(ptr);
@@ -850,7 +839,6 @@ class RTree {
     const rc = M._rtw_clear(this.ctx);
     if (rc !== 0) throw codeError(rc, 'clear');
     this._size = 0;
-    this._writeThrough();
   }
 
   size() {
@@ -874,16 +862,19 @@ class RTree {
       throw new Error('Destination sync handle is required for compaction');
     }
     const M = requireModule();
-    const oldSize = M._rtw_image_len(this.ctx);
+    const oldSize = this.syncAccessHandle.getSize();
 
-    const rc = M._rtw_compact(this.ctx);
-    if (rc !== 0) throw codeError(rc, 'compact');
-    const ptr = M._rtw_out_ptr(this.ctx);
-    const newSize = M._rtw_out_len(this.ctx);
-    const bytes = M.HEAPU8.slice(ptr, ptr + newSize);
-
+    // The C side streams the compacted records straight to the destination
+    // handle in chunks; the compacted file is never materialized in memory.
     destSyncHandle.truncate(0);
-    destSyncHandle.write(bytes, { at: 0 });
+    const dstFd = registerHandle(M, destSyncHandle);
+    try {
+      const rc = M._rtw_compact(this.ctx, dstFd);
+      if (rc !== 0) throw codeError(rc, 'compact');
+    } finally {
+      unregisterHandle(M, dstFd);
+    }
+    const newSize = destSyncHandle.getSize();
     destSyncHandle.flush();
     await destSyncHandle.close();
 
@@ -916,71 +907,54 @@ class TextLog {
     this.diffsPerSnapshot = diffsPerSnapshot;
     this.isOpen = false;
     this.ctx = 0;
+    this._fd = 0;
     this.version = 0;
-    this._flushedLen = 0; // image bytes already written to the handle
 
     // Shim mirroring the reference's `file` member (used by some tests).
     this.file = {
       syncAccessHandle: syncHandle,
-      getFileSize: () => (this.ctx ? Module._tlw_image_len(this.ctx)
-                                   : this.syncAccessHandle.getSize())
+      getFileSize: () => this.syncAccessHandle.getSize()
     };
   }
 
-  /** Open the log: load an existing file image or initialize a new one. */
+  /**
+   * Open the log against the file handle. The C side is file-resident: open
+   * scans the file once to index entry offsets, then every read fetches only
+   * the records it needs and every addVersion writes straight through
+   * (matching the model of src/textlog.js).
+   */
   async open() {
     if (this.isOpen) {
       throw new Error('TextLog is already open');
     }
     const M = await ready();
 
+    this._fd = registerHandle(M, this.syncAccessHandle);
     const fileSize = this.syncAccessHandle.getSize();
     if (fileSize > 0) {
-      const buf = new Uint8Array(fileSize);
-      this.syncAccessHandle.read(buf, { at: 0 });
-      const ptr = M._malloc(fileSize);
-      M.HEAPU8.set(buf, ptr);
-      this.ctx = M._tlw_load(ptr, fileSize);
-      M._free(ptr);
+      this.ctx = M._tlw_open(this._fd);
       if (!this.ctx) {
+        unregisterHandle(M, this._fd);
         throw new Error('Failed to read metadata: no valid metadata found');
       }
       this.diffsPerSnapshot = M._tlw_diffs_per_snapshot(this.ctx);
-      this._flushedLen = fileSize; // existing bytes are already on disk
     } else {
-      this.ctx = M._tlw_create(this.diffsPerSnapshot);
-      if (!this.ctx) throw new Error('Failed to create TextLog');
-      this._flushedLen = 0;
+      this.ctx = M._tlw_create(this._fd, this.diffsPerSnapshot);
+      if (!this.ctx) {
+        unregisterHandle(M, this._fd);
+        throw new Error('Failed to create TextLog');
+      }
     }
     this.version = M._tlw_version(this.ctx);
     this.isOpen = true;
-    // Persist the freshly-created metadata immediately, as the reference does
-    // in _initializeNewLog.
-    this._writeThrough();
   }
 
-  /**
-   * Append the image bytes not yet on disk to the file handle (no fsync). The
-   * image is append-only, so only the tail past _flushedLen is ever new.
-   */
-  _writeThrough() {
-    const M = requireModule();
-    const len = M._tlw_image_len(this.ctx);
-    if (len > this._flushedLen) {
-      const ptr = M._tlw_image_ptr(this.ctx);
-      const chunk = M.HEAPU8.slice(ptr + this._flushedLen, ptr + len);
-      this.syncAccessHandle.write(chunk, { at: this._flushedLen });
-      this._flushedLen = len;
-    }
-  }
-
-  /** Persist any pending image bytes to the sync handle and fsync. */
+  /** fsync the file handle (all writes are already on it). */
   flush() {
-    this._writeThrough();
     this.syncAccessHandle.flush();
   }
 
-  /** Persist, close the sync handle, and release the WASM context. */
+  /** Close the sync handle and release the WASM context. */
   async close() {
     if (!this.isOpen) return;
     if (this.syncAccessHandle) {
@@ -991,6 +965,8 @@ class TextLog {
       Module._tlw_free(this.ctx);
       this.ctx = 0;
     }
+    unregisterHandle(Module, this._fd);
+    this._fd = 0;
     this.isOpen = false;
   }
 
@@ -1022,7 +998,6 @@ class TextLog {
       const v = M._tlw_add_version(this.ctx, ptr, bytes.length, Date.now());
       if (v < 0) throw codeError(v, 'addVersion');
       this.version = v;
-      this._writeThrough();
       return v;
     } finally {
       M._free(ptr);
@@ -1139,12 +1114,6 @@ class TextIndex {
     return [this.index.ctx, this.documentTerms.ctx, this.documentLengths.ctx];
   }
 
-  _syncAll() {
-    this.index.syncAfter();
-    this.documentTerms.syncAfter();
-    this.documentLengths.syncAfter();
-  }
-
   async add(docId, text) {
     this._ensureOpen();
     if (!docId) throw new Error('Document ID is required');
@@ -1156,7 +1125,6 @@ class TextIndex {
       const [ix, dt, dl] = this._ctxs();
       const rc = M._tixw_add(ix, dt, dl, d.ptr, d.len, x.ptr, x.len);
       if (rc !== 0) throw codeError(rc, 'add');
-      this._syncAll();
     } finally {
       d.free(); x.free();
     }
@@ -1170,7 +1138,6 @@ class TextIndex {
       const [ix, dt, dl] = this._ctxs();
       const rc = M._tixw_remove(ix, dt, dl, d.ptr, d.len);
       if (rc < 0) throw codeError(rc, 'remove');
-      this._syncAll();
       return rc === 1;
     } finally {
       d.free();
@@ -1221,7 +1188,6 @@ class TextIndex {
     const [ix, dt, dl] = this._ctxs();
     const rc = M._tixw_clear(ix, dt, dl);
     if (rc !== 0) throw codeError(rc, 'clear');
-    this._syncAll();
   }
 
   async compact({ index: destIndex, documentTerms: destDocTerms, documentLengths: destDocLengths }) {

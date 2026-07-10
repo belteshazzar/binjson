@@ -52,20 +52,20 @@ ALL_EXPORTS='_malloc,_free,'\
 '_bjw_enc_finish,_bjw_enc_ptr,_bjw_enc_size,'\
 '_bjw_decode,_bjw_events_ptr,_bjw_events_len,_bjw_consumed,_bjw_value_size,'\
 `# bplustree (also used by textindex)`\
-'_bptw_create,_bptw_load,_bptw_free,'\
+'_bptw_create,_bptw_open,_bptw_free,'\
 '_bptw_add,_bptw_delete,_bptw_search,_bptw_entries,_bptw_range,_bptw_height,'\
 '_bptw_size,_bptw_root,_bptw_next_id,_bptw_order,'\
-'_bptw_out_ptr,_bptw_out_len,_bptw_image_ptr,_bptw_image_len,'\
+'_bptw_out_ptr,_bptw_out_len,'\
 `# rtree`\
-'_rtw_create,_rtw_load,_rtw_free,'\
+'_rtw_create,_rtw_open,_rtw_free,'\
 '_rtw_insert,_rtw_remove,_rtw_clear,_rtw_search,_rtw_search_radius,_rtw_haversine,_rtw_compact,'\
 '_rtw_size,_rtw_max_entries,'\
-'_rtw_out_ptr,_rtw_out_len,_rtw_image_ptr,_rtw_image_len,'\
+'_rtw_out_ptr,_rtw_out_len,'\
 `# textlog`\
-'_tlw_create,_tlw_load,_tlw_free,'\
+'_tlw_create,_tlw_open,_tlw_free,'\
 '_tlw_add_version,_tlw_get_version,_tlw_get_version_hash,_tlw_get_diff,'\
 '_tlw_version,_tlw_diffs_per_snapshot,'\
-'_tlw_out_ptr,_tlw_out_len,_tlw_image_ptr,_tlw_image_len,'\
+'_tlw_out_ptr,_tlw_out_len,'\
 `# diff`\
 '_diff_create_patch,_diff_get_diff,_diff_apply_patch,'\
 `# stemmer`\
@@ -78,6 +78,7 @@ ALL_EXPORTS='_malloc,_free,'\
 # with its own main() and is deliberately excluded.
 ALL_SOURCES=(
   c/binjson.c c/binjson_wasm.c
+  c/bjfile.c c/hostio.c
   c/bplustree.c c/bplustree_wasm.c
   c/geo.c c/rtree.c c/rtree_wasm.c
   c/diff.c c/textlog.c c/textlog_wasm.c
