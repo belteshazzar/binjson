@@ -631,7 +631,10 @@ class BPlusTree {
   }
 
   /**
-   * Compact into a fresh file, dropping stale append-only history.
+   * Compact into a fresh file, dropping stale append-only history and any
+   * deletion cruft. The C side streams a minimal fully-packed tree (bulk
+   * load) straight to the destination handle — nothing is materialized in
+   * memory.
    * @param {FileSystemSyncAccessHandle} destSyncHandle
    * @returns {Promise<{oldSize:number,newSize:number,bytesSaved:number}>}
    */
@@ -642,16 +645,20 @@ class BPlusTree {
     if (!destSyncHandle) {
       throw new Error('Destination sync handle is required for compaction');
     }
+    const M = requireModule();
     const oldSize = this.syncAccessHandle.getSize();
 
-    const entries = this.toArray();
-    const newTree = new BPlusTree(destSyncHandle, this.order);
-    await newTree.open();
-    for (const entry of entries) {
-      newTree.add(entry.key, entry.value);
+    destSyncHandle.truncate(0);
+    const dstFd = registerHandle(M, destSyncHandle);
+    try {
+      const rc = M._bptw_compact(this.ctx, dstFd);
+      if (rc !== 0) throw codeError(rc, 'compact');
+    } finally {
+      unregisterHandle(M, dstFd);
     }
     const newSize = destSyncHandle.getSize();
-    await newTree.close();
+    destSyncHandle.flush();
+    await destSyncHandle.close();
 
     return {
       oldSize,
