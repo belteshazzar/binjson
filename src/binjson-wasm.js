@@ -603,15 +603,66 @@ class BPlusTree {
     }
   }
 
-  /** Async iterator over { key, value } entries in sorted order. */
-  async *[Symbol.asyncIterator]() {
+  /** Allocate an optional marshalled key: undefined/null means "no bound". */
+  #allocKeyOpt(key) {
+    if (key === undefined || key === null) {
+      return { type: -1, num: 0, ptr: 0, len: 0, free() {} };
+    }
+    return this.#allocKey(key);
+  }
+
+  /**
+   * Stream entries in sorted order through a C cursor, optionally bounded to
+   * minKey <= key <= maxKey (either bound may be omitted). Memory is bounded
+   * by the batch size, not the result size: the cursor reads one leaf at a
+   * time and entries cross the bridge in ~64 KB batches.
+   *
+   * The cursor pins the tree's root at open, so iteration sees a consistent
+   * snapshot even if the tree is mutated while iterating.
+   */
+  async *iterate(minKey, maxKey) {
     if (!this.isOpen) {
       throw new Error('Tree must be open before iteration');
     }
-    if (this.size() === 0) return;
-    for (const entry of this.toArray()) {
-      yield entry;
+    const M = requireModule();
+    const kmin = this.#allocKeyOpt(minKey);
+    const kmax = this.#allocKeyOpt(maxKey);
+    let cur;
+    try {
+      cur = M._bptw_cursor_open(
+        this.ctx,
+        kmin.type, kmin.num, kmin.ptr, kmin.len,
+        kmax.type, kmax.num, kmax.ptr, kmax.len
+      );
+    } finally {
+      kmin.free();
+      kmax.free();
     }
+    if (!cur) throw new Error('Failed to open cursor');
+    try {
+      // Batches grow from 2 KB to 64 KB: the first results arrive after a
+      // couple of leaf reads (early termination stays cheap), while long
+      // scans quickly reach full batch throughput.
+      let batchBytes = 2048;
+      for (;;) {
+        if (!this.isOpen) throw new Error('Tree closed during iteration');
+        const n = M._bptw_cursor_next(cur, batchBytes);
+        if (n < 0) throw codeError(n, 'cursor');
+        if (n === 0) return;
+        const ptr = M._bptw_out_ptr();
+        const len = M._bptw_out_len();
+        const batch = decode(M.HEAPU8.slice(ptr, ptr + len));
+        for (const entry of batch) yield entry;
+        batchBytes = Math.min(batchBytes * 4, 65536);
+      }
+    } finally {
+      M._bptw_cursor_free(cur);
+    }
+  }
+
+  /** Async iterator over { key, value } entries in sorted order. */
+  async *[Symbol.asyncIterator]() {
+    yield* this.iterate();
   }
 
   /** Tree height (0 for a single leaf). */
