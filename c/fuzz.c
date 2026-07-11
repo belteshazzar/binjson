@@ -155,6 +155,12 @@ static void ex_bpt(dbuf *img) {
         }
         bj_builder_free(b);
     }
+    /* Churn: a run of deletes drives leaf/internal underflow and the
+     * merge/redistribute rebalancing, including root collapses. */
+    for (int g = 0; g < 24; g++) {
+        bpt_key dk = num_key((double)(rnd() % 48));
+        bpt_delete(t, &dk);
+    }
     const uint8_t *bp; size_t bl;
     if (bpt_boundaries(t, &bp, &bl) == 0) {
         bpt *snap = bpt_snapshot(t);
