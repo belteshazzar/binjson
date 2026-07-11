@@ -9,10 +9,10 @@
  * identical file size, and the packed file stays readable by the pure-JS
  * implementation (it contains the durability header/trailer records).
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree } from '../src/binjson-wasm.js';
 import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
-import { getFileHandle } from '../src/binjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
 await ready();
@@ -26,7 +26,16 @@ describe.skipIf(!hasOPFS)('WASM B+ tree bulk-load compaction', () => {
     root = await navigator.storage.getDirectory();
   });
 
-  const name = () => `test-compaction-${Date.now()}-${counter++}.bj`;
+  const files = [];
+  const name = () => {
+    const n = `test-compaction-${Date.now()}-${counter++}.bj`;
+    files.push(n);
+    return n;
+  };
+
+  afterAll(async () => {
+    for (const f of files) await deleteFile(root, f);
+  });
 
   async function sync(filename, create = false) {
     const fh = await getFileHandle(root, filename, { create });

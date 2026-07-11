@@ -12,11 +12,11 @@
  * the old scan was quadratic, the reindex path after removals, and
  * order-sensitive parity with the pure-JS reference.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, TextIndex, BPlusTree } from '../src/binjson-wasm.js';
 import { TextIndex as TextIndexJS } from '../src/textindex.js';
 import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
-import { getFileHandle } from '../src/binjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
 await ready();
@@ -31,10 +31,17 @@ describe.skipIf(!hasOPFS)('WASM TextIndex at scale (hash-map dict)', () => {
   });
 
   const base = () => `test-tixscale-${Date.now()}-${counter++}`;
+  const files = [];
+
+  afterAll(async () => {
+    for (const f of files) await deleteFile(root, f);
+  });
 
   async function makeIndex(Index, Tree, name) {
     async function tree(suffix) {
-      const fh = await getFileHandle(root, `${name}-${suffix}.bj`, { create: true });
+      const filename = `${name}-${suffix}.bj`;
+      files.push(filename);
+      const fh = await getFileHandle(root, filename, { create: true });
       return new Tree(await fh.createSyncAccessHandle(), 16);
     }
     const idx = new Index({

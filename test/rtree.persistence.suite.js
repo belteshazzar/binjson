@@ -2,7 +2,7 @@
  * Shared R-tree persistence suite, parameterized by implementation.
  * See test/rtree.suite.js for the pattern.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ObjectId, deleteFile, getFileHandle } from '../src/binjson.js';
 
 export function runRTreePersistenceSuite(label, RTree, hasOPFS) {
@@ -16,9 +16,18 @@ export function runRTreePersistenceSuite(label, RTree, hasOPFS) {
       }
     });
 
+    const createdFiles = [];
+
     function getTestFilename() {
-      return `test-rtree-persistence-${label}-${Date.now()}-${testFileCounter++}.bj`;
+      const name = `test-rtree-persistence-${label}-${Date.now()}-${testFileCounter++}.bj`;
+      createdFiles.push(name);
+      return name;
     }
+
+    afterAll(async () => {
+      if (!rootDirHandle) return;
+      for (const name of createdFiles) await deleteFile(rootDirHandle, name);
+    });
 
     async function createTestTree(order = 4) {
       const filename = getTestFilename();

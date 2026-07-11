@@ -7,9 +7,9 @@
  * A counting proxy around the sync access handle pins the read counts down,
  * and singleton-range sweeps exercise every separator-boundary edge case.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree } from '../src/binjson-wasm.js';
-import { getFileHandle } from '../src/binjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
 await ready();
@@ -23,7 +23,16 @@ describe.skipIf(!hasOPFS)('WASM B+ tree range pruning', () => {
     root = await navigator.storage.getDirectory();
   });
 
-  const name = () => `test-pruning-${Date.now()}-${counter++}.bj`;
+  const files = [];
+  const name = () => {
+    const n = `test-pruning-${Date.now()}-${counter++}.bj`;
+    files.push(n);
+    return n;
+  };
+
+  afterAll(async () => {
+    for (const f of files) await deleteFile(root, f);
+  });
 
   async function sync(filename, create = false) {
     const fh = await getFileHandle(root, filename, { create });

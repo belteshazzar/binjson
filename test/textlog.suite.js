@@ -5,7 +5,7 @@
  * runTextLogSuite with their TextLog class so the identical assertions run
  * against each. `label` distinguishes runs (and test filenames in OPFS).
  */
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import { deleteFile, getFileHandle } from '../src/binjson.js';
 
 export function runTextLogSuite(label, TextLog, hasOPFS) {
@@ -19,9 +19,18 @@ export function runTextLogSuite(label, TextLog, hasOPFS) {
       }
     });
 
+    const createdFiles = [];
+
     function getTestFilename() {
-      return `test-textlog-${label}-${Date.now()}-${testFileCounter++}.bj`;
+      const name = `test-textlog-${label}-${Date.now()}-${testFileCounter++}.bj`;
+      createdFiles.push(name);
+      return name;
     }
+
+    afterAll(async () => {
+      if (!rootDirHandle) return;
+      for (const name of createdFiles) await deleteFile(rootDirHandle, name);
+    });
 
     async function createTestLog(diffsPerSnapshot = 10) {
       const filename = getTestFilename();

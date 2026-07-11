@@ -65,11 +65,13 @@ export function runBPlusTreeSuite(label, BPlusTree, hasOPFS) {
       });
 
       it('should throw error for invalid order', async function () {
-        const fileHandle = await getFileHandle(rootDirHandle, getTestFilename(), { create: true });
+        const filename = getTestFilename();
+        const fileHandle = await getFileHandle(rootDirHandle, filename, { create: true });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         expect(() => new BPlusTree(syncHandle, 2)).toThrow('B+ tree order must be at least 3');
         expect(() => new BPlusTree(syncHandle, 1)).toThrow('B+ tree order must be at least 3');
         await syncHandle.close();
+        await cleanupFile(filename);
       });
     });
 

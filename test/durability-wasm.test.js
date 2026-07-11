@@ -11,10 +11,10 @@
  * fixed tail offset and ignore unknown records — the interop tests at the
  * bottom prove that both directions still work.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree, RTree, TextLog } from '../src/binjson-wasm.js';
 import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
-import { BinJsonFile, ObjectId, Pointer, getFileHandle } from '../src/binjson.js';
+import { BinJsonFile, ObjectId, Pointer, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
 await ready();
@@ -28,7 +28,16 @@ describe.skipIf(!hasOPFS)('WASM durability & crash recovery', () => {
     root = await navigator.storage.getDirectory();
   });
 
-  const name = () => `test-durability-${Date.now()}-${counter++}.bj`;
+  const files = [];
+  const name = () => {
+    const n = `test-durability-${Date.now()}-${counter++}.bj`;
+    files.push(n);
+    return n;
+  };
+
+  afterAll(async () => {
+    for (const f of files) await deleteFile(root, f);
+  });
 
   async function sync(filename, create = false) {
     const fh = await getFileHandle(root, filename, { create });

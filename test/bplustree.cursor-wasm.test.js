@@ -7,9 +7,9 @@
  * Cursors pin the root at open, so — the tree being append-only — they
  * iterate a consistent snapshot even while the tree is mutated.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree } from '../src/binjson-wasm.js';
-import { getFileHandle } from '../src/binjson.js';
+import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
 await ready();
@@ -23,7 +23,16 @@ describe.skipIf(!hasOPFS)('WASM B+ tree cursors', () => {
     root = await navigator.storage.getDirectory();
   });
 
-  const name = () => `test-cursor-${Date.now()}-${counter++}.bj`;
+  const files = [];
+  const name = () => {
+    const n = `test-cursor-${Date.now()}-${counter++}.bj`;
+    files.push(n);
+    return n;
+  };
+
+  afterAll(async () => {
+    for (const f of files) await deleteFile(root, f);
+  });
 
   async function sync(filename, create = false) {
     const fh = await getFileHandle(root, filename, { create });
