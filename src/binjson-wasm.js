@@ -39,7 +39,8 @@ const ERR = {
   [-4]: 'Unknown type byte',
   [-5]: 'Decoded integer exceeds safe range',
   [-6]: 'Pointer offset out of valid range',
-  [-7]: 'Maximum nesting depth exceeded'
+  [-7]: 'Maximum nesting depth exceeded',
+  [-8]: 'Structural invariant violated'
 };
 
 const textEncoder = new TextEncoder();
@@ -673,6 +674,23 @@ class BPlusTree {
     const h = M._bptw_height(this.ctx);
     if (h < 0) throw codeError(h, 'getHeight');
     return h;
+  }
+
+  /**
+   * Walk every node checking the tree's structural invariants: key order
+   * and routing-key consistency, node capacity, uniform leaf depth,
+   * child-before-parent offsets (no cycles), and the entry count matching
+   * the metadata size. Min-fill is deliberately not checked — JS-written
+   * files never rebalance and are legitimately under-filled — and unary
+   * internal nodes are legal (compaction emits them at level tails).
+   * Returns true, or throws describing the corruption. O(N): a
+   * testing/diagnostic tool, not an every-request check.
+   */
+  verify() {
+    const M = requireModule();
+    const rc = M._bptw_verify(this.ctx);
+    if (rc !== 0) throw codeError(rc, 'verify');
+    return true;
   }
 
   size() {

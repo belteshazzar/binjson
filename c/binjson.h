@@ -57,6 +57,7 @@ extern "C" {
 #define BJ_ERR_INT_RANGE     (-5)  /* INT outside JS safe-integer range   */
 #define BJ_ERR_POINTER_RANGE (-6)  /* POINTER outside JS safe-int range   */
 #define BJ_ERR_DEPTH         (-7)  /* nesting exceeded BJ_MAX_DEPTH        */
+#define BJ_ERR_VERIFY        (-8)  /* structural invariant violated        */
 
 /* ---- Builder (encode) ----------------------------------------------- */
 typedef struct bj_builder bj_builder;

@@ -161,6 +161,9 @@ static void ex_bpt(dbuf *img) {
         bpt_key dk = num_key((double)(rnd() % 48));
         bpt_delete(t, &dk);
     }
+    /* The full-tree invariant walk must never crash or hang, whatever the
+     * mutations did (errors are the expected outcome on corrupt images). */
+    bpt_verify(t);
     const uint8_t *bp; size_t bl;
     if (bpt_boundaries(t, &bp, &bl) == 0) {
         bpt *snap = bpt_snapshot(t);
