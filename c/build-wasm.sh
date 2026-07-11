@@ -81,7 +81,7 @@ ALL_EXPORTS='_malloc,_free,'\
 '_stemmer_stem,'\
 `# textindex`\
 '_tixw_recover,_tixw_add,_tixw_remove,_tixw_clear,_tixw_query,_tixw_query_all,_tixw_term_count,'\
-'_tixw_out_ptr,_tixw_out_len'
+'_tixw_out_new,_tixw_out_free,_tixw_out_ptr,_tixw_out_len'
 
 # Every C source, each listed once. c/test_binjson.c is a native test harness
 # with its own main() and is deliberately excluded.

@@ -551,12 +551,20 @@ class BPlusTree {
       const rc = M._bptw_search(this.ctx, k.type, k.num, k.ptr, k.len);
       if (rc < 0) throw codeError(rc, 'search');
       if (rc === 0) return undefined;
-      const ptr = M._bptw_out_ptr();
-      const len = M._bptw_out_len();
-      return decode(M.HEAPU8.slice(ptr, ptr + len));
+      return this.#readOut(M, 'search');
     } finally {
       k.free();
     }
+  }
+
+  /** Decode this tree's last output buffer (scoped to the handle: calls on
+   * other trees don't disturb it). Throws if the length overflows the
+   * boundary's int. */
+  #readOut(M, op) {
+    const ptr = M._bptw_out_ptr(this.ctx);
+    const len = M._bptw_out_len(this.ctx);
+    if (len < 0) throw codeError(len, op);
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
   }
 
   /** Delete a key (no-op if absent). */
@@ -577,9 +585,7 @@ class BPlusTree {
     const M = requireModule();
     const rc = M._bptw_entries(this.ctx);
     if (rc !== 0) throw codeError(rc, 'toArray');
-    const ptr = M._bptw_out_ptr();
-    const len = M._bptw_out_len();
-    return decode(M.HEAPU8.slice(ptr, ptr + len));
+    return this.#readOut(M, 'toArray');
   }
 
   /** Entries with min <= key <= max, in sorted order. */
@@ -594,9 +600,7 @@ class BPlusTree {
         kmax.type, kmax.num, kmax.ptr, kmax.len
       );
       if (rc !== 0) throw codeError(rc, 'rangeSearch');
-      const ptr = M._bptw_out_ptr();
-      const len = M._bptw_out_len();
-      return decode(M.HEAPU8.slice(ptr, ptr + len));
+      return this.#readOut(M, 'rangeSearch');
     } finally {
       kmin.free();
       kmax.free();
@@ -649,9 +653,7 @@ class BPlusTree {
         const n = M._bptw_cursor_next(cur, batchBytes);
         if (n < 0) throw codeError(n, 'cursor');
         if (n === 0) return;
-        const ptr = M._bptw_out_ptr();
-        const len = M._bptw_out_len();
-        const batch = decode(M.HEAPU8.slice(ptr, ptr + len));
+        const batch = this.#readOut(M, 'cursor');
         for (const entry of batch) yield entry;
         batchBytes = Math.min(batchBytes * 4, 65536);
       }
@@ -741,10 +743,7 @@ class BPlusTree {
     const M = requireModule();
     const rc = M._bptw_boundaries(this.ctx);
     if (rc !== 0) throw codeError(rc, 'boundaries');
-    const ptr = M._bptw_out_ptr();
-    const len = M._bptw_out_len();
-    if (len === 0) return [];
-    return decode(M.HEAPU8.slice(ptr, ptr + len));
+    return this.#readOut(M, 'boundaries');
   }
 
   /**
@@ -948,9 +947,7 @@ class RTree {
         const n = M._rtw_cursor_next(cur, batchBytes);
         if (n < 0) throw codeError(n, 'iterateBBox');
         if (n === 0) return;
-        const ptr = M._rtw_out_ptr(this.ctx);
-        const len = M._rtw_out_len(this.ctx);
-        const entries = decode(M.HEAPU8.slice(ptr, ptr + len));
+        const entries = this._readOut(M, 'iterateBBox');
         for (const e of entries) yield e;
         batchBytes = Math.min(batchBytes * 4, 65536);
       }
@@ -971,8 +968,16 @@ class RTree {
     const M = requireModule();
     const rc = M._rtw_nearest(this.ctx, lat, lng, k);
     if (rc !== 0) throw codeError(rc, 'nearest');
+    return this._readOut(M, 'nearest');
+  }
+
+  /** Decode this tree's last output buffer (scoped to the handle: calls on
+   * other trees don't disturb it). Throws if the length overflows the
+   * boundary's int. */
+  _readOut(M, op) {
     const ptr = M._rtw_out_ptr(this.ctx);
     const len = M._rtw_out_len(this.ctx);
+    if (len < 0) throw codeError(len, op);
     if (len === 0) return [];
     return decode(M.HEAPU8.slice(ptr, ptr + len));
   }
@@ -982,10 +987,7 @@ class RTree {
     const M = requireModule();
     const rc = M._rtw_search(this.ctx, bbox.minLat, bbox.maxLat, bbox.minLng, bbox.maxLng);
     if (rc !== 0) throw codeError(rc, 'searchBBox');
-    const ptr = M._rtw_out_ptr(this.ctx);
-    const len = M._rtw_out_len(this.ctx);
-    if (len === 0) return [];
-    return decode(M.HEAPU8.slice(ptr, ptr + len));
+    return this._readOut(M, 'searchBBox');
   }
 
   /** Search for points within a bounding box; returns { objectId, lat, lng }. */
@@ -1008,10 +1010,7 @@ class RTree {
     const M = requireModule();
     const rc = M._rtw_search_radius(this.ctx, lat, lng, radiusKm);
     if (rc !== 0) throw codeError(rc, 'searchRadius');
-    const ptr = M._rtw_out_ptr(this.ctx);
-    const len = M._rtw_out_len(this.ctx);
-    if (len === 0) return [];
-    return decode(M.HEAPU8.slice(ptr, ptr + len));
+    return this._readOut(M, 'searchRadius');
   }
 
   /** Drop all entries by appending a fresh empty root. */
@@ -1155,6 +1154,7 @@ class TextLog {
   _readOut(M) {
     const ptr = M._tlw_out_ptr(this.ctx);
     const len = M._tlw_out_len(this.ctx);
+    if (len < 0) throw codeError(len, 'textlog');
     if (len === 0) return '';
     return decoder.decode(M.HEAPU8.slice(ptr, ptr + len));
   }
@@ -1275,6 +1275,7 @@ class TextIndex {
     // to one set of tree files; give freshly compacted files an empty one.
     this.journal = journal || null;
     this.journalFd = -1;
+    this.outCtx = 0;   // per-index query-output slot in the WASM heap
     this.isOpen = false;
   }
 
@@ -1283,6 +1284,8 @@ class TextIndex {
     if (!this.index || !this.documentTerms || !this.documentLengths) {
       throw new Error('Trees must be initialized before opening');
     }
+    if (!this.outCtx) this.outCtx = requireModule()._tixw_out_new();
+    if (!this.outCtx) throw new Error('Failed to allocate query output slot');
     await Promise.all([this.index.open(), this.documentTerms.open(), this.documentLengths.open()]);
     if (this.journal) {
       const M = requireModule();
@@ -1301,6 +1304,10 @@ class TextIndex {
   }
 
   async close() {
+    if (this.outCtx) {
+      requireModule()._tixw_out_free(this.outCtx);
+      this.outCtx = 0;
+    }
     if (!this.isOpen) return;
     if (this.journalFd >= 0) {
       unregisterHandle(requireModule(), this.journalFd);
@@ -1351,8 +1358,9 @@ class TextIndex {
   }
 
   _readOut(M) {
-    const ptr = M._tixw_out_ptr();
-    const len = M._tixw_out_len();
+    const ptr = M._tixw_out_ptr(this.outCtx);
+    const len = M._tixw_out_len(this.outCtx);
+    if (len < 0) throw codeError(len, 'query');
     if (len === 0) return [];
     return decode(M.HEAPU8.slice(ptr, ptr + len));
   }
@@ -1364,11 +1372,11 @@ class TextIndex {
     try {
       const [ix, dt, dl] = this._ctxs();
       if (options.requireAll) {
-        const rc = M._tixw_query_all(ix, dt, dl, q.ptr, q.len);
+        const rc = M._tixw_query_all(this.outCtx, ix, dt, dl, q.ptr, q.len);
         if (rc !== 0) throw codeError(rc, 'query');
         return this._readOut(M); // array of id strings
       }
-      const rc = M._tixw_query(ix, dt, dl, q.ptr, q.len);
+      const rc = M._tixw_query(this.outCtx, ix, dt, dl, q.ptr, q.len);
       if (rc !== 0) throw codeError(rc, 'query');
       const results = this._readOut(M); // array of { id, score }
       if (options.scored === false) return results.map(r => r.id);
