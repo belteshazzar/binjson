@@ -165,6 +165,31 @@ describe.skipIf(!hasOPFS)('WASM TextIndex block-partitioned postings', () => {
     await fresh.close();
   });
 
+  it('clear resets the files instead of growing them (§4.6)', async () => {
+    const name = base();
+    const idx = await makeIndex(TextIndex, BPlusTree, name);
+    for (let i = 0; i < 300; i++) await idx.add(`doc-${i}`, docText(i));
+    await idx.close();
+    const before = await fileSize(`${name}-terms.bj`);
+
+    const again = await makeIndex(TextIndex, BPlusTree, name);
+    await again.clear();
+    expect(await again.getDocumentCount()).toBe(0);
+    expect(await again.getTermCount()).toBe(0);
+    expect(await again.query('shared')).toHaveLength(0);
+
+    // Clearing must still work after: the index is fully usable.
+    await again.add('doc-new', 'fresh zebra');
+    expect(await again.query('zebra', { scored: false })).toEqual(['doc-new']);
+    await again.close();
+
+    // The old per-key clear *grew* the append-only file; reset shrinks it
+    // to a stub (header + empty root + metadata) plus one tiny re-add.
+    const after = await fileSize(`${name}-terms.bj`);
+    expect(before).toBeGreaterThan(50000);
+    expect(after).toBeLessThan(2000);
+  });
+
   it('deletes a term chain when its last document is removed', async () => {
     const idx = await makeIndex(TextIndex, BPlusTree, base());
     await idx.add('doc-a', 'ephemeral zebra');
