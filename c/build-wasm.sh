@@ -59,6 +59,7 @@ ALL_EXPORTS='_malloc,_free,'\
 '_bjw_decode,_bjw_events_ptr,_bjw_events_len,_bjw_consumed,_bjw_value_size,'\
 `# bplustree (also used by textindex)`\
 '_bptw_create,_bptw_open,_bptw_free,'\
+'_bptw_snapshot,_bptw_open_at,_bptw_boundaries,_bptw_is_snapshot,'\
 '_bptw_add,_bptw_delete,_bptw_search,_bptw_entries,_bptw_range,_bptw_height,_bptw_compact,'\
 '_bptw_cursor_open,_bptw_cursor_next,_bptw_cursor_free,'\
 '_bptw_size,_bptw_root,_bptw_next_id,_bptw_order,'\

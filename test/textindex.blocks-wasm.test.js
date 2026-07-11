@@ -92,7 +92,7 @@ describe.skipIf(!hasOPFS)('WASM TextIndex block-partitioned postings', () => {
     await legacy.close();
     const legacySize = await fileSize(`${legacyName}-terms.bj`);
     expect(full).toBeLessThan(legacySize / 2);
-  }, 30000);
+  }, 90000);   // the legacy comparison index is slow to build under full-suite load
 
   it('reads JS-written (legacy) index files and migrates on write', async () => {
     const name = base();

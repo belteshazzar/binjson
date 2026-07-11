@@ -155,6 +155,16 @@ static void ex_bpt(dbuf *img) {
         }
         bj_builder_free(b);
     }
+    const uint8_t *bp; size_t bl;
+    if (bpt_boundaries(t, &bp, &bl) == 0) {
+        bpt *snap = bpt_snapshot(t);
+        if (snap) {
+            bpt_entries(snap, &p, &n);
+            bpt_free(snap);
+        }
+    }
+    bpt *at = bpt_open_at(&io, rnd() % ((uint64_t)img->len + 1));
+    if (at) { bpt_search(at, &k, &found, &p, &n); bpt_free(at); }
     dbuf dst; memset(&dst, 0, sizeof(dst));
     bj_io dio = mem_io(&dst);
     bpt_compact(t, &dio);

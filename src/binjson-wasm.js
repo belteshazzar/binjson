@@ -682,6 +682,72 @@ class BPlusTree {
   }
 
   /**
+   * Wrap a C-side read-only handle as a snapshot object: all read APIs work
+   * (search, rangeSearch, toArray, iterate, size, compact), mutations throw.
+   * The snapshot shares this tree's file handle without owning it — close
+   * the snapshot before closing the parent tree.
+   */
+  #wrapSnapshot(ctx) {
+    const M = requireModule();
+    // A real instance (not Object.create) so private-field methods work.
+    const snap = new BPlusTree(this.syncAccessHandle, M._bptw_order(ctx));
+    snap.ctx = ctx;                 // shared file handle, not owned
+    snap._fd = this._fd;
+    snap._size = M._bptw_size(ctx);
+    snap.isOpen = true;
+    snap.isSnapshot = true;
+    snap.open = async () => { throw new Error('Snapshot is already open'); };
+    snap.close = async function () {
+      if (!this.isOpen) return;
+      requireModule()._bptw_free(this.ctx);
+      this.ctx = 0;
+      this.isOpen = false;
+    };
+    return snap;
+  }
+
+  /**
+   * Read-only snapshot pinned at the current root. The file is append-only,
+   * so the snapshot stays consistent while this tree keeps mutating (it
+   * simply never sees later changes). Invalidated if the file is truncated
+   * or replaced (e.g. adopting a compaction).
+   */
+  snapshot() {
+    if (!this.isOpen) throw new Error('Tree file is not open');
+    const ctx = requireModule()._bptw_snapshot(this.ctx);
+    if (!ctx) throw new Error('Failed to create snapshot');
+    return this.#wrapSnapshot(ctx);
+  }
+
+  /**
+   * Read-only snapshot pinned at a historical commit boundary — an `offset`
+   * from boundaries(). Time-travel: the tree exactly as it was when that
+   * commit landed.
+   */
+  snapshotAt(offset) {
+    if (!this.isOpen) throw new Error('Tree file is not open');
+    const ctx = requireModule()._bptw_open_at(this._fd, offset);
+    if (!ctx) throw new Error(`No commit boundary at offset ${offset}`);
+    return this.#wrapSnapshot(ctx);
+  }
+
+  /**
+   * Every verified commit boundary in the file, oldest first, as
+   * [{ offset, size }] — offset opens that state via snapshotAt(), size is
+   * the entry count it had. Scans the file.
+   */
+  boundaries() {
+    if (!this.isOpen) throw new Error('Tree file is not open');
+    const M = requireModule();
+    const rc = M._bptw_boundaries(this.ctx);
+    if (rc !== 0) throw codeError(rc, 'boundaries');
+    const ptr = M._bptw_out_ptr();
+    const len = M._bptw_out_len();
+    if (len === 0) return [];
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
+  /**
    * Compact into a fresh file, dropping stale append-only history and any
    * deletion cruft. The C side streams a minimal fully-packed tree (bulk
    * load) straight to the destination handle — nothing is materialized in
