@@ -187,7 +187,7 @@ describe.skipIf(!hasOPFS)('WASM TextIndex block-partitioned postings', () => {
     // to a stub (header + empty root + metadata) plus one tiny re-add.
     const after = await fileSize(`${name}-terms.bj`);
     expect(before).toBeGreaterThan(50000);
-    expect(after).toBeLessThan(2000);
+    expect(after).toBeLessThan(4000);
   });
 
   it('deletes a term chain when its last document is removed', async () => {

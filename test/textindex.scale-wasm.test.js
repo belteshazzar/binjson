@@ -104,7 +104,11 @@ describe.skipIf(!hasOPFS)('WASM TextIndex at scale (hash-map dict)', () => {
     await idx.close();
   });
 
-  it('matches the pure-JS reference exactly: ids, scores, and order', async () => {
+  it('matches the pure-JS reference on which docs match', async () => {
+    // Scoring diverged deliberately (the C engine uses BM25, the JS
+    // reference plain TF-IDF — C_DATABASE_REVIEW.md §4.9), so scored
+    // queries are compared as matched-id sets; requireAll has no scoring
+    // and must agree exactly, order included.
     const name = base();
     const wasm = await makeIndex(TextIndex, BPlusTree, `${name}-w`);
     const js = await makeIndex(TextIndexJS, BPlusTreeJS, `${name}-j`);
@@ -117,8 +121,8 @@ describe.skipIf(!hasOPFS)('WASM TextIndex at scale (hash-map dict)', () => {
     for (const q of ['shared', 'shared group2', 'unique42x corpus', 'common quarter0 group9']) {
       const a = await wasm.query(q);
       const b = await js.query(q);
-      expect(a.map((r) => r.id)).toEqual(b.map((r) => r.id)); // order-sensitive
-      for (let i = 0; i < a.length; i++) expect(a[i].score).toBeCloseTo(b[i].score, 10);
+      expect(a.map((r) => r.id).sort()).toEqual(b.map((r) => r.id).sort());
+      for (const r of a) expect(r.score).toBeGreaterThan(0); // BM25 idf > 0 always
     }
     const aAll = await wasm.query('shared group5', { requireAll: true });
     const bAll = await js.query('shared group5', { requireAll: true });
