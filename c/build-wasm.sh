@@ -67,6 +67,7 @@ ALL_EXPORTS='_malloc,_free,'\
 `# rtree`\
 '_rtw_create,_rtw_open,_rtw_free,'\
 '_rtw_insert,_rtw_remove,_rtw_remove_at,_rtw_clear,_rtw_search,_rtw_search_radius,_rtw_haversine,_rtw_compact,'\
+'_rtw_cursor_open,_rtw_cursor_next,_rtw_cursor_free,_rtw_nearest,'\
 '_rtw_size,_rtw_max_entries,'\
 '_rtw_out_ptr,_rtw_out_len,'\
 `# textlog`\

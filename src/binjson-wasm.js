@@ -929,6 +929,54 @@ class RTree {
     }
   }
 
+  /**
+   * Stream bounding-box matches without materializing the result set:
+   * yields { objectId, lat, lng } in bounded batches, pinned to the tree
+   * state at the first pull (append-only snapshot semantics). Early
+   * termination reads only the nodes already visited.
+   */
+  async *iterateBBox(bbox) {
+    if (!this.isOpen) {
+      throw new Error('R-tree file must be opened before use');
+    }
+    const M = requireModule();
+    const cur = M._rtw_cursor_open(this.ctx, bbox.minLat, bbox.maxLat, bbox.minLng, bbox.maxLng);
+    if (!cur) throw new Error('Failed to open cursor');
+    try {
+      let batchBytes = 2048;
+      for (;;) {
+        const n = M._rtw_cursor_next(cur, batchBytes);
+        if (n < 0) throw codeError(n, 'iterateBBox');
+        if (n === 0) return;
+        const ptr = M._rtw_out_ptr(this.ctx);
+        const len = M._rtw_out_len(this.ctx);
+        const entries = decode(M.HEAPU8.slice(ptr, ptr + len));
+        for (const e of entries) yield e;
+        batchBytes = Math.min(batchBytes * 4, 65536);
+      }
+    } finally {
+      M._rtw_cursor_free(cur);
+    }
+  }
+
+  /**
+   * The k nearest entries to a point, best-first over node bounding boxes —
+   * reads only subtrees that can beat the current candidates. Returns
+   * [{ objectId, lat, lng, distance }] by ascending haversine km.
+   */
+  nearest(lat, lng, k) {
+    if (!this.isOpen) {
+      throw new Error('R-tree file must be opened before use');
+    }
+    const M = requireModule();
+    const rc = M._rtw_nearest(this.ctx, lat, lng, k);
+    if (rc !== 0) throw codeError(rc, 'nearest');
+    const ptr = M._rtw_out_ptr(this.ctx);
+    const len = M._rtw_out_len(this.ctx);
+    if (len === 0) return [];
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
   /** Candidate entries whose point falls inside a bounding box. */
   _searchBBoxRaw(bbox) {
     const M = requireModule();

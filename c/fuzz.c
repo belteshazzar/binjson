@@ -179,11 +179,20 @@ static void ex_rtree(dbuf *img) {
     const uint8_t *p; size_t n;
     rtree_search_bbox(t, -90, 90, -180, 180, &p, &n);
     rtree_search_radius(t, 10, 10, 500, &p, &n);
+    rtree_cursor *c = rtree_cursor_open(t, -90, 90, -180, 180);
+    if (c) {
+        double la, ln;
+        uint8_t eo[12];
+        for (int g = 0; g < 100000 && rtree_cursor_next(c, &la, &ln, eo) == 1; g++) {}
+        rtree_cursor_close(c);
+    }
+    rtree_nearest(t, 10, 20, 8, &p, &n);
     uint8_t oid[12];
     memset(oid, (int)(rnd() % 64), sizeof(oid));
     rtree_insert(t, 1.5, 2.5, oid);
     int removed;
     rtree_remove(t, oid, &removed);
+    rtree_remove_at(t, 1.5, 2.5, oid, &removed);
     dbuf dst; memset(&dst, 0, sizeof(dst));
     bj_io dio = mem_io(&dst);
     rtree_compact(t, &dio);
