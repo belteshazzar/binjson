@@ -898,20 +898,29 @@ class RTree {
     }
   }
 
-  /** Remove the entry for an ObjectId. Returns true if one was removed. */
-  remove(objectId) {
+  /**
+   * Remove the entry for an ObjectId. Returns true if one was removed.
+   * Pass the entry's stored coordinates when known: OIDs have no spatial
+   * locality, so a blind remove probes subtrees in order (worst-case the
+   * whole tree) while a located remove prunes to the point's path. A wrong
+   * point finds nothing and returns false.
+   */
+  remove(objectId, lat, lng) {
     if (!this.isOpen) {
       throw new Error('R-tree file must be opened before use');
     }
     if (!(objectId instanceof ObjectId)) {
       throw new Error('objectId must be an instance of ObjectId to remove from rtree');
     }
+    const located = typeof lat === 'number' && typeof lng === 'number';
     const M = requireModule();
     const bytes = objectId.toBytes();
     const ptr = M._malloc(12);
     M.HEAPU8.set(bytes, ptr);
     try {
-      const rc = M._rtw_remove(this.ctx, ptr);
+      const rc = located
+        ? M._rtw_remove_at(this.ctx, lat, lng, ptr)
+        : M._rtw_remove(this.ctx, ptr);
       if (rc < 0) throw codeError(rc, 'remove');
       this._size = M._rtw_size(this.ctx);
       return rc === 1;

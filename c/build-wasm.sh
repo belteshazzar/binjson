@@ -66,7 +66,7 @@ ALL_EXPORTS='_malloc,_free,'\
 '_bptw_out_ptr,_bptw_out_len,'\
 `# rtree`\
 '_rtw_create,_rtw_open,_rtw_free,'\
-'_rtw_insert,_rtw_remove,_rtw_clear,_rtw_search,_rtw_search_radius,_rtw_haversine,_rtw_compact,'\
+'_rtw_insert,_rtw_remove,_rtw_remove_at,_rtw_clear,_rtw_search,_rtw_search_radius,_rtw_haversine,_rtw_compact,'\
 '_rtw_size,_rtw_max_entries,'\
 '_rtw_out_ptr,_rtw_out_len,'\
 `# textlog`\
