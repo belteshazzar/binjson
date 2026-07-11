@@ -163,6 +163,31 @@ describe.skipIf(!hasOPFS)('WASM hostile files', () => {
     await tree.close();
   });
 
+  it('rejects non-finite numeric keys (§2.7)', async () => {
+    // NaN compares equal to everything in the key comparator, so inserting
+    // one would silently overwrite an arbitrary key.
+    const file = name();
+    const fh = await getFileHandle(root, file, { create: true });
+    const tree = new BPlusTree(await fh.createSyncAccessHandle(), 4);
+    await tree.open();
+    for (let i = 0; i < 20; i++) tree.add(i, `v${i}`);
+
+    expect(() => tree.add(NaN, 'poison')).toThrow();
+    expect(() => tree.add(Infinity, 'poison')).toThrow();
+    expect(() => tree.add(-Infinity, 'poison')).toThrow();
+    expect(() => tree.delete(NaN)).toThrow();
+    await expect(async () => tree.search(NaN)).rejects.toThrow();
+    expect(() => tree.rangeSearch(NaN, 10)).toThrow();
+    await expect(collect(tree.iterate(NaN))).rejects.toThrow();
+
+    // Nothing was overwritten, and ±infinity stays valid as a range bound.
+    expect(tree.size()).toBe(20);
+    expect(await tree.search(7)).toBe('v7');
+    expect(tree.rangeSearch(-Infinity, Infinity).length).toBe(20);
+    expect((await collect(tree.iterate(Infinity)))).toEqual([]);
+    await tree.close();
+  });
+
   async function fileSize(filename) {
     const fh = await getFileHandle(root, filename, { create: false });
     const h = await fh.createSyncAccessHandle();
