@@ -11,13 +11,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p lib
 
-# Flags shared by every module.
+# Flags shared by every module. The tree traversals recurse up to their
+# depth caps (BPT_MAX_DEPTH / RT_MAX_DEPTH = 128) on corrupt files before
+# erroring out; the default 64 KB stack silently overflows into the heap at
+# that depth, so give the stack real headroom and make any future overflow
+# trap loudly instead of corrupting memory.
 COMMON_FLAGS=(
   -O3
   -flto
   -sMODULARIZE=1
   -sEXPORT_ES6=1
   -sALLOW_MEMORY_GROWTH=1
+  -sSTACK_SIZE=1048576
+  -sSTACK_OVERFLOW_CHECK=1
   -sENVIRONMENT=web,worker,node
   -sEXPORTED_RUNTIME_METHODS=HEAPU8
   -sALLOW_TABLE_GROWTH=0
