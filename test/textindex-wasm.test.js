@@ -11,4 +11,4 @@ import { runTextIndexSuite } from './textindex.suite.js';
 await ready();
 const { hasOPFS } = await bootstrapOPFS();
 
-runTextIndexSuite('WASM', { TextIndex, BPlusTree }, hasOPFS);
+runTextIndexSuite('WASM', { TextIndex, BPlusTree }, hasOPFS, { replaceOnAdd: true });

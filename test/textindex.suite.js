@@ -8,7 +8,8 @@
 import { describe, it, beforeEach, afterEach, expect, beforeAll } from 'vitest';
 import { deleteFile, getFileHandle } from '../src/binjson.js';
 
-export function runTextIndexSuite(label, { TextIndex, BPlusTree }, hasOPFS) {
+export function runTextIndexSuite(label, { TextIndex, BPlusTree }, hasOPFS, opts = {}) {
+  const { replaceOnAdd = false } = opts;
   describe.skipIf(!hasOPFS)(`${label}: TextIndex`, function() {
     let index;
     let baseName;
@@ -121,7 +122,13 @@ export function runTextIndexSuite(label, { TextIndex, BPlusTree }, hasOPFS) {
         await index.add('doc1', 'hello world');
         await index.add('doc1', 'goodbye world');
         expect(await index.getDocumentCount()).toBe(1);
-        expect(await index.getTermCount()).toBe(3);
+        // The C implementation replaces the document on re-add, so "hello"
+        // disappears from the index; the JS reference merges terms and
+        // keeps it (C_DATABASE_REVIEW.md §4.3).
+        expect(await index.getTermCount()).toBe(replaceOnAdd ? 2 : 3);
+        const hello = await index.query('hello', { scored: false });
+        if (replaceOnAdd) expect(hello).toEqual([]);
+        else expect(hello).toContain('doc1');
       });
 
       it('should handle complex text with various word forms', async function() {

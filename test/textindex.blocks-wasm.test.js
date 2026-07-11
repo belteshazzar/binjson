@@ -121,38 +121,48 @@ describe.skipIf(!hasOPFS)('WASM TextIndex block-partitioned postings', () => {
     await idx.close();
   });
 
-  it('matches the JS reference when docs are re-added across block boundaries', async () => {
+  it('replaces docs on re-add, even across block boundaries', async () => {
+    // Re-add must equal remove-then-add (C_DATABASE_REVIEW.md §4.3): build
+    // one index where doc-0 is added early (its entries end up buried in
+    // block 0), then re-added with different content after 50 more docs —
+    // and a reference index that only ever saw the final content. Their
+    // query results must be identical.
     const name = base();
-    const wasm = await makeIndex(TextIndex, BPlusTree, `${name}-w`);
-    const js = await makeIndex(TextIndexJS, BPlusTreeJS, `${name}-j`);
+    const readded = await makeIndex(TextIndex, BPlusTree, `${name}-a`);
+    const fresh = await makeIndex(TextIndex, BPlusTree, `${name}-b`);
 
-    // doc-0 lands in block 0; 50 more docs push the active block past it;
-    // then doc-0 is re-added with a different tf for "shared".
-    const ops = [['doc-0', 'shared once']];
-    for (let i = 1; i <= 50; i++) ops.push([`doc-${i}`, docText(i)]);
-    ops.push(['doc-0', 'shared shared shared thrice']);
-    for (const [id, text] of ops) {
-      await wasm.add(id, text);
-      await js.add(id, text);
+    await readded.add('doc-0', 'shared once');
+    for (let i = 1; i <= 50; i++) {
+      await readded.add(`doc-${i}`, docText(i));
+      await fresh.add(`doc-${i}`, docText(i));
     }
+    await readded.add('doc-0', 'shared shared shared thrice');
+    await fresh.add('doc-0', 'shared shared shared thrice');
 
-    expect(await wasm.getDocumentCount()).toBe(51);
-    const a = await wasm.query('shared');
-    const b = await js.query('shared');
-    expect(a.map((r) => r.id)).toEqual(b.map((r) => r.id));
-    for (let i = 0; i < a.length; i++) expect(a[i].score).toBeCloseTo(b[i].score, 10);
-    // doc-0 appears exactly once despite entries in two blocks.
-    expect(a.filter((r) => r.id === 'doc-0').length).toBe(1);
+    expect(await readded.getDocumentCount()).toBe(51);
+    // Same ids and same scores. (Ordering among *equal* scores reflects
+    // posting insertion order — history-dependent and not part of the
+    // replace contract, so compare id-sorted.)
+    const norm = (rs) => [...rs].sort((x, y) => x.id.localeCompare(y.id));
+    for (const q of ['shared', 'once', 'thrice', 'shared thrice']) {
+      const a = norm(await readded.query(q));
+      const b = norm(await fresh.query(q));
+      expect(a.map((r) => r.id)).toEqual(b.map((r) => r.id));
+      for (let i = 0; i < a.length; i++) expect(a[i].score).toBeCloseTo(b[i].score, 10);
+    }
+    // The vanished term no longer matches doc-0 anywhere...
+    expect(await readded.query('once')).toHaveLength(0);
+    expect(await readded.query('shared once', { requireAll: true })).toEqual([]);
+    // ...and doc-0 appears exactly once despite entries in two blocks.
+    const hits = await readded.query('shared');
+    expect(hits.filter((r) => r.id === 'doc-0').length).toBe(1);
 
-    // Removing doc-0 clears both entries.
-    await wasm.remove('doc-0');
-    await js.remove('doc-0');
-    const a2 = await wasm.query('shared');
-    const b2 = await js.query('shared');
-    expect(a2.some((r) => r.id === 'doc-0')).toBe(false);
-    expect(a2.map((r) => r.id)).toEqual(b2.map((r) => r.id));
-    await wasm.close();
-    await js.close();
+    // Removing doc-0 clears both block entries.
+    await readded.remove('doc-0');
+    expect((await readded.query('shared')).some((r) => r.id === 'doc-0')).toBe(false);
+    expect(await readded.query('thrice')).toHaveLength(0);
+    await readded.close();
+    await fresh.close();
   });
 
   it('deletes a term chain when its last document is removed', async () => {
