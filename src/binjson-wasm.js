@@ -1141,11 +1141,17 @@ const ENTRY_TYPE = {
  */
 class TextIndex {
   constructor(options = {}) {
-    const { order = 16, trees } = options;
+    const { order = 16, trees, journal } = options;
     this.order = order;
     this.index = trees?.index || null;
     this.documentTerms = trees?.documentTerms || null;
     this.documentLengths = trees?.documentLengths || null;
+    // Optional sync access handle for the cross-tree commit journal: with it,
+    // every add/remove/clear is atomic across the three tree files (a crash
+    // between tree writes is rolled back on the next open). A journal belongs
+    // to one set of tree files; give freshly compacted files an empty one.
+    this.journal = journal || null;
+    this.journalFd = -1;
     this.isOpen = false;
   }
 
@@ -1155,11 +1161,30 @@ class TextIndex {
       throw new Error('Trees must be initialized before opening');
     }
     await Promise.all([this.index.open(), this.documentTerms.open(), this.documentLengths.open()]);
+    if (this.journal) {
+      const M = requireModule();
+      this.journalFd = registerHandle(M, this.journal);
+      const [ix, dt, dl] = this._ctxs();
+      const rc = M._tixw_recover(this.journalFd, ix, dt, dl);
+      if (rc !== 0) {
+        unregisterHandle(M, this.journalFd);
+        this.journalFd = -1;
+        this.journal.close();
+        await Promise.all([this.index.close(), this.documentTerms.close(), this.documentLengths.close()]);
+        throw codeError(rc, 'recover');
+      }
+    }
     this.isOpen = true;
   }
 
   async close() {
     if (!this.isOpen) return;
+    if (this.journalFd >= 0) {
+      unregisterHandle(requireModule(), this.journalFd);
+      this.journalFd = -1;
+      this.journal.flush();
+      this.journal.close();
+    }
     await Promise.all([this.index.close(), this.documentTerms.close(), this.documentLengths.close()]);
     this.isOpen = false;
   }
@@ -1181,7 +1206,7 @@ class TextIndex {
     const x = allocStr(M, t);
     try {
       const [ix, dt, dl] = this._ctxs();
-      const rc = M._tixw_add(ix, dt, dl, d.ptr, d.len, x.ptr, x.len);
+      const rc = M._tixw_add(ix, dt, dl, this.journalFd, d.ptr, d.len, x.ptr, x.len);
       if (rc !== 0) throw codeError(rc, 'add');
     } finally {
       d.free(); x.free();
@@ -1194,7 +1219,7 @@ class TextIndex {
     const d = allocStr(M, String(docId));
     try {
       const [ix, dt, dl] = this._ctxs();
-      const rc = M._tixw_remove(ix, dt, dl, d.ptr, d.len);
+      const rc = M._tixw_remove(ix, dt, dl, this.journalFd, d.ptr, d.len);
       if (rc < 0) throw codeError(rc, 'remove');
       return rc === 1;
     } finally {
@@ -1247,7 +1272,7 @@ class TextIndex {
     this._ensureOpen();
     const M = requireModule();
     const [ix, dt, dl] = this._ctxs();
-    const rc = M._tixw_clear(ix, dt, dl);
+    const rc = M._tixw_clear(ix, dt, dl, this.journalFd);
     if (rc !== 0) throw codeError(rc, 'clear');
   }
 

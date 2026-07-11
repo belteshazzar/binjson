@@ -208,9 +208,9 @@ static void ex_textindex(dbuf *img) {
     if (tix_query(t, t, t, "hello world seven", 17, &out, &out_len) == 0) free(out);
     out = NULL;
     if (tix_query_all(t, t, t, "hello world", 11, &out, &out_len) == 0) free(out);
-    tix_add(t, t, t, "doc-1", 5, "some text to index", 18);
+    tix_add(t, t, t, NULL, "doc-1", 5, "some text to index", 18);
     int removed;
-    tix_remove(t, t, t, "doc-1", 5, &removed);
+    tix_remove(t, t, t, NULL, "doc-1", 5, &removed);
     bpt_free(t);
 }
 
