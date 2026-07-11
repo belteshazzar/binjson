@@ -1232,7 +1232,10 @@ class TextIndex {
 
   async getTermCount() {
     this._ensureOpen();
-    return this.index.size();
+    const M = requireModule();
+    const n = M._tixw_term_count(this.index.ctx);
+    if (n < 0) throw codeError(n, 'getTermCount');
+    return n;
   }
 
   async getDocumentCount() {
