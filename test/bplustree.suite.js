@@ -188,8 +188,7 @@ export function runBPlusTreeSuite(label, BPlusTree, hasOPFS) {
         const filename = tree._testFilename;
         await tree.close();
 
-        // Reopen using helper function
-        tree = await createTestTree(3);
+        // Reopen from the same file
         const fileHandle = await getFileHandle(rootDirHandle, filename, { create: false });
         const syncHandle = await fileHandle.createSyncAccessHandle();
         tree = new BPlusTree(syncHandle, 3);
