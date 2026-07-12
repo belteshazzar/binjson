@@ -894,7 +894,13 @@ class RTree {
     this.isOpen = false;
   }
 
-  /** Insert a point (lat, lng) associated with an ObjectId. */
+  /**
+   * Insert a point (lat, lng) associated with an ObjectId.
+   *
+   * ObjectId uniqueness is the caller's contract: duplicates are never
+   * checked, so inserting the same id twice stores two independent entries
+   * and remove() takes out only one of them.
+   */
   insert(lat, lng, objectId) {
     if (!this.isOpen) {
       throw new Error('R-tree file must be opened before use');
