@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, RTree } from '../src/binjson-wasm.js';
-import { RTree as RTreeJS } from '../src/rtree.js';
+import { writeFixture } from './legacy-fixtures.js';
 import { ObjectId, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -110,13 +110,11 @@ describe.skipIf(!hasOPFS)('WASM R-tree located removal', () => {
   });
 
   it('located removal survives underflow churn and legacy files', async () => {
-    // Legacy JS-written tree: no childBBoxes, so pruning falls back to
-    // child loads but must stay correct.
+    // Legacy JS-written tree (frozen fixture: order 4, points pt(0..149)):
+    // no childBBoxes, so pruning falls back to child loads but must stay
+    // correct.
     const file = name();
-    const js = new RTreeJS(await sync(file, true), 4);
-    await js.open();
-    for (let i = 0; i < 150; i++) await js.insert(pt(i).lat, pt(i).lng, oid(i));
-    await js.close();
+    writeFixture(await sync(file, true), 'rtree-o4-150.bin');
 
     const t = new RTree(await sync(file), 4);
     await t.open();

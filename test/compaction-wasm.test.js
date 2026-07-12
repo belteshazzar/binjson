@@ -11,8 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree } from '../src/binjson-wasm.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
-import { deleteFile, getFileHandle } from '../src/binjson.js';
+import { BinJsonFile, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
 await ready();
@@ -104,7 +103,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree bulk-load compaction', () => {
     await twice.close();
   });
 
-  it('produces a file the pure-JS implementation reads and extends', async () => {
+  it('produces a file JavaScript reads record by record', async () => {
     const src = name();
     const dst = name();
     const tree = await openTree(src, 4, true);
@@ -112,17 +111,28 @@ describe.skipIf(!hasOPFS)('WASM B+ tree bulk-load compaction', () => {
     await tree.compact(await sync(dst, true));
     await tree.close();
 
-    const js = new BPlusTreeJS(await sync(dst), 4);
-    await js.open();
-    expect(await js.search('k7')).toEqual({ n: 7 });
-    expect((await js.toArray()).length).toBe(50);
-    await js.add('js-added', { n: -1 });
-    await js.close();
-
-    const back = await openTree(dst, 4);
-    expect(back.size()).toBe(51);
-    expect(back.search('js-added')).toEqual({ n: -1 });
-    await back.close();
+    // Record-level read from JS (binjson.js): the packed file holds nodes,
+    // exactly one metadata record (no append-only history), and the entries
+    // are all there — including k7's value, decoded straight from its leaf.
+    const handle = await sync(dst);
+    const file = new BinJsonFile(handle);
+    let metas = 0;
+    let leafKeys = [];
+    let k7 = null;
+    for (const { value } of file.scan()) {
+      if (value && typeof value === 'object' && 'rootPointer' in value) {
+        metas++;
+        expect(value.size).toBe(50);
+      } else if (value && typeof value === 'object' && value.isLeaf) {
+        leafKeys = leafKeys.concat(value.keys);
+        const at = value.keys.indexOf('k7');
+        if (at >= 0) k7 = value.values[at];
+      }
+    }
+    handle.close();
+    expect(metas).toBe(1);
+    expect(leafKeys.length).toBe(50);
+    expect(k7).toEqual({ n: 7 });
   });
 
   it('compacts an empty tree', async () => {

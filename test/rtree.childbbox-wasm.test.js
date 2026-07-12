@@ -12,7 +12,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, RTree } from '../src/binjson-wasm.js';
-import { RTree as RTreeJS } from '../src/rtree.js';
+import { writeFixture } from './legacy-fixtures.js';
+import { BinJsonFile } from '../src/binjson.js';
 import { ObjectId, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -94,10 +95,8 @@ describe.skipIf(!hasOPFS)('WASM R-tree child bounding boxes', () => {
 
   it('upgrades legacy (JS-written) trees on write and stays correct', async () => {
     const file = name();
-    const js = new RTreeJS(await sync(file, true), 9);
-    await js.open();
-    for (let i = 0; i < 300; i++) await js.insert(pt(i).lat, pt(i).lng, oid(i));
-    await js.close();
+    // Frozen fixture: order 9, points pt(0..299), no childBBoxes.
+    writeFixture(await sync(file, true), 'rtree-o9-300.bin');
 
     const proxy = counting(await sync(file));
     const t = new RTree(proxy, 9);
@@ -120,7 +119,7 @@ describe.skipIf(!hasOPFS)('WASM R-tree child bounding boxes', () => {
     await t.close();
   });
 
-  it('interoperates with the JS implementation in both directions', async () => {
+  it('childBBoxes-carrying files stay readable by JavaScript at the record level', async () => {
     const file = name();
     {
       const t = new RTree(await sync(file, true), 9);
@@ -129,24 +128,29 @@ describe.skipIf(!hasOPFS)('WASM R-tree child bounding boxes', () => {
       await t.close();
     }
 
-    // JS reads a childBBoxes-carrying file, searches it, and appends.
-    const js = new RTreeJS(await sync(file), 9);
-    await js.open();
-    expect(js.size()).toBe(120);
-    const all = await js.searchBBox({ minLat: -90, maxLat: 90, minLng: -180, maxLng: 180 });
-    expect(all.length).toBe(120);
-    await js.insert(45.5, 45.5, oid(300001));
-    await js.close();
-
-    // WASM reopens the mixed file: searches, removes, and inserts still work.
-    const t = new RTree(await sync(file), 9);
-    await t.open();
-    expect(t.size()).toBe(121);
-    const near = t.searchBBox({ minLat: 45, maxLat: 46, minLng: 45, maxLng: 46 });
-    expect(near.some((h) => h.lat === 45.5)).toBe(true);
-    expect(t.remove(oid(300001))).toBe(true);
-    expect(t.size()).toBe(120);
-    await t.close();
+    // JavaScript reads the file record by record (binjson.js): every node
+    // decodes, internal nodes expose the childBBoxes extension, and the last
+    // metadata record reports the live entry count.
+    const handle = await sync(file);
+    const scanFile = new BinJsonFile(handle);
+    let leafEntries = 0;
+    let internalWithBoxes = 0;
+    let lastMeta = null;
+    for (const { value } of scanFile.scan()) {
+      if (value && typeof value === 'object' && 'isLeaf' in value) {
+        if (value.isLeaf) leafEntries += value.children.length;
+        else if (Array.isArray(value.childBBoxes)) {
+          expect(value.childBBoxes.length).toBe(value.children.length);
+          internalWithBoxes++;
+        }
+      } else if (value && typeof value === 'object' && 'rootPointer' in value) {
+        lastMeta = value;
+      }
+    }
+    handle.close();
+    expect(internalWithBoxes).toBeGreaterThan(0);
+    expect(leafEntries).toBeGreaterThanOrEqual(120);   // append-only history
+    expect(lastMeta.size).toBe(120);
   });
 
   it('keeps child boxes consistent through heavy remove/underflow churn', async () => {
@@ -174,10 +178,8 @@ describe.skipIf(!hasOPFS)('WASM R-tree child bounding boxes', () => {
   it('compaction refreshes child boxes and upgrades legacy files', async () => {
     const src = name();
     const dst = name();
-    const js = new RTreeJS(await sync(src, true), 9);
-    await js.open();
-    for (let i = 0; i < 150; i++) await js.insert(pt(i).lat, pt(i).lng, oid(i));
-    await js.close();
+    // Frozen fixture: order 9, points pt(0..149), no childBBoxes.
+    writeFixture(await sync(src, true), 'rtree-o9-150.bin');
 
     const t = new RTree(await sync(src), 9);
     await t.open();

@@ -552,10 +552,83 @@ function decode(data) {
 }
 
 /**
- * OPFS File Operations using FileSystemSyncAccessHandle
- * 
- * IMPORTANT: This class wraps FileSystemSyncAccessHandle which is only available
- * in Web Workers. It provides synchronous file operations with explicit flush control.
+ * An in-memory implementation of the FileSystemSyncAccessHandle contract
+ * (getSize / read / write / truncate / flush / close) over a growable byte
+ * buffer.
+ *
+ * This is the bridge between JavaScript and the C/WASM data structures for
+ * data that lives in memory rather than OPFS: everything that accepts a sync
+ * access handle accepts a MemoryHandle — `new BinJsonFile(new MemoryHandle())`
+ * for record-level access from JS, and the WASM structure classes
+ * (BPlusTree/RTree/TextIndex/TextLog in binjson-wasm.js) to build or open a
+ * structure entirely in memory. `toBytes()` snapshots the content for
+ * shipping (postMessage, network, IndexedDB); `new MemoryHandle(bytes)`
+ * reopens it on either side.
+ */
+class MemoryHandle {
+  #buf;
+  #len;
+
+  /** @param {Uint8Array} [bytes] - initial content (copied). */
+  constructor(bytes) {
+    this.#len = bytes ? bytes.length : 0;
+    this.#buf = new Uint8Array(Math.max(this.#len, 256));
+    if (bytes) this.#buf.set(bytes, 0);
+  }
+
+  #ensure(size) {
+    if (size <= this.#buf.length) return;
+    let cap = this.#buf.length * 2;
+    while (cap < size) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this.#buf.subarray(0, this.#len), 0);
+    this.#buf = next;
+  }
+
+  getSize() {
+    return this.#len;
+  }
+
+  read(buffer, options = {}) {
+    const at = options.at ?? 0;
+    if (at >= this.#len) return 0;
+    const n = Math.min(buffer.length, this.#len - at);
+    buffer.set(this.#buf.subarray(at, at + n), 0);
+    return n;
+  }
+
+  write(buffer, options = {}) {
+    const at = options.at ?? 0;
+    this.#ensure(at + buffer.length);
+    // Writing past the end zero-fills the gap (matches OPFS semantics).
+    if (at > this.#len) this.#buf.fill(0, this.#len, at);
+    this.#buf.set(buffer, at);
+    if (at + buffer.length > this.#len) this.#len = at + buffer.length;
+    return buffer.length;
+  }
+
+  truncate(size) {
+    this.#ensure(size);
+    if (size > this.#len) this.#buf.fill(0, this.#len, size);
+    this.#len = size;
+  }
+
+  flush() {}
+  close() {}
+
+  /** A copy of the current content. */
+  toBytes() {
+    return this.#buf.slice(0, this.#len);
+  }
+}
+
+/**
+ * Record-level access to a binjson file through any object implementing the
+ * FileSystemSyncAccessHandle contract — a real OPFS sync access handle
+ * (Web Workers only) or a MemoryHandle. This is how JavaScript reads the
+ * files (and memory images) the C/WASM data structures write: `scan()` walks
+ * every record, `read(pointer)` decodes the record at an offset, and
+ * `append()`/`write()` emit records the C side parses.
  */
 class BinJsonFile {
   constructor(syncAccessHandle) {
@@ -577,6 +650,46 @@ class BinJsonFile {
       return buffer.slice(0, bytesRead);
     }
     return buffer;
+  }
+
+  /**
+   * On-wire size of the record starting at `at`. Containers carry their
+   * byte size, so this costs at most two small reads.
+   */
+  #recordSize(at) {
+    const head = this.#readRange(at, 1);
+    if (head.length < 1) throw new Error(`Truncated record at offset ${at}`);
+    const type = head[0];
+
+    switch (type) {
+      case TYPE.NULL:
+      case TYPE.FALSE:
+      case TYPE.TRUE:
+        return 1;
+
+      case TYPE.INT:
+      case TYPE.FLOAT:
+      case TYPE.DATE:
+      case TYPE.POINTER:
+        return 1 + 8;
+
+      case TYPE.OID:
+        return 1 + 12;
+
+      case TYPE.STRING:
+      case TYPE.BINARY:
+      case TYPE.ARRAY:
+      case TYPE.OBJECT: {
+        // 4-byte little-endian length/size follows the type byte.
+        const lenBytes = this.#readRange(at + 1, 4);
+        if (lenBytes.length < 4) throw new Error(`Truncated record at offset ${at}`);
+        const view = new DataView(lenBytes.buffer, lenBytes.byteOffset, 4);
+        return 1 + 4 + view.getUint32(0, true);
+      }
+
+      default:
+        throw new Error(`Unknown type byte: 0x${type.toString(16)}`);
+    }
   }
 
   /**
@@ -614,16 +727,17 @@ class BinJsonFile {
     }
 
     const pointerValue = pointer.valueOf();
-    
+
     // Validate pointer offset
     if (pointerValue < 0 || pointerValue >= fileSize) {
       throw new Error(`Pointer offset ${pointer} out of file bounds [0, ${fileSize})`);
     }
-    
-    // Read from pointer offset to end of file
-    const binaryData = this.#readRange(pointerValue, fileSize - pointerValue);
-    
-    // Decode and return the first value
+
+    // Read exactly the record at the offset (not offset-to-EOF: on the large
+    // append-only structure files this used to read almost the whole file
+    // for every node access).
+    const binaryData = this.#readRange(pointerValue, this.#recordSize(pointerValue));
+
     return decode(binaryData);
   }
 
@@ -657,85 +771,25 @@ class BinJsonFile {
    */
   *scan() {
     const fileSize = this.getFileSize();
-      
-      if (fileSize === 0) {
-        return;
-      }
-      
-      let offset = 0;
-      
-      // Scan through and yield each top-level value
-      while (offset < fileSize) {
-        // Helper function to determine how many bytes a value occupies
-        const getValueSize = (readPosition) => {
-          // Read 1 byte for type
-          let tempData = this.#readRange(readPosition, 1);
-          let pos = 1;
-          const type = tempData[0];
-          
-          switch (type) {
-            case TYPE.NULL:
-            case TYPE.FALSE:
-            case TYPE.TRUE:
-              return 1;
-            
-            case TYPE.INT:
-            case TYPE.FLOAT:
-            case TYPE.DATE:
-            case TYPE.POINTER:
-              return 1 + 8;
 
-            case TYPE.OID:
-              return 1 + 12;
-            
-            case TYPE.STRING: {
-              // Read length (4 bytes)
-              tempData = this.#readRange(readPosition + 1, 4);
-              const view = new DataView(tempData.buffer, tempData.byteOffset, 4);
-              const length = view.getUint32(0, true);
-              return 1 + 4 + length;
-            }
-            
-            case TYPE.BINARY: {
-              // Read length (4 bytes)
-              tempData = this.#readRange(readPosition + 1, 4);
-              const view = new DataView(tempData.buffer, tempData.byteOffset, 4);
-              const length = view.getUint32(0, true);
-              return 1 + 4 + length;
-            }
-            
-            case TYPE.ARRAY: {
-              // Read size in bytes (4 bytes)
-              tempData = this.#readRange(readPosition + 1, 4);
-              const view = new DataView(tempData.buffer, tempData.byteOffset, 4);
-              const size = view.getUint32(0, true);
-              return 1 + 4 + size; // type + size + content
-            }
-            
-            case TYPE.OBJECT: {
-              // Read size in bytes (4 bytes)
-              tempData = this.#readRange(readPosition + 1, 4);
-              const view = new DataView(tempData.buffer, tempData.byteOffset, 4);
-              const size = view.getUint32(0, true);
-              return 1 + 4 + size; // type + size + content
-            }
-            
-            default:
-              throw new Error(`Unknown type byte: 0x${type.toString(16)}`);
-          }
-        };
-        
-        // Determine size of the current value
-        const valueSize = getValueSize(offset);
+    if (fileSize === 0) {
+      return;
+    }
 
-        // Read only the bytes needed for this value
-        const valueData = this.#readRange(offset, valueSize);
-        const valueOffset = offset;
-        offset += valueSize;
+    let offset = 0;
 
-        // Decode and yield this value along with its byte position and size
-        yield { value: decode(valueData), offset: valueOffset, size: valueSize };
-      }
+    // Scan through and yield each top-level value
+    while (offset < fileSize) {
+      const valueSize = this.#recordSize(offset);
+
+      // Read only the bytes needed for this value
+      const valueData = this.#readRange(offset, valueSize);
+      const valueOffset = offset;
+      offset += valueSize;
+
+      // Decode and yield this value along with its byte position and size
+      yield { value: decode(valueData), offset: valueOffset, size: valueSize };
+    }
   }
 }
 
@@ -788,6 +842,7 @@ export {
   encode,
   decode,
   BinJsonFile,
+  MemoryHandle,
   exists,
   deleteFile,
   getFileHandle

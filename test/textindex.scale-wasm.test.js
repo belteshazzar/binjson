@@ -7,15 +7,13 @@
  * decoding an n-entry posting is O(n) instead of O(n²), and accumulating
  * scores over P posting entries is O(P) instead of O(P·S). Iteration order is
  * unchanged (insertion order, matching the JS reference's Map semantics), so
- * encoded blobs and result ordering are byte-identical to the JS
- * implementation. These tests exercise the hash map at posting sizes where
- * the old scan was quadratic, the reindex path after removals, and
- * order-sensitive parity with the pure-JS reference.
+ * encoded blobs and result ordering stayed byte-identical to the (since
+ * removed) JS implementation. These tests exercise the hash map at posting
+ * sizes where the old scan was quadratic and the reindex path after
+ * removals.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, TextIndex, BPlusTree } from '../src/binjson-wasm.js';
-import { TextIndex as TextIndexJS } from '../src/textindex.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
 import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -104,30 +102,4 @@ describe.skipIf(!hasOPFS)('WASM TextIndex at scale (hash-map dict)', () => {
     await idx.close();
   });
 
-  it('matches the pure-JS reference on which docs match', async () => {
-    // Scoring diverged deliberately (the C engine uses BM25, the JS
-    // reference plain TF-IDF — C_DATABASE_REVIEW.md §4.9), so scored
-    // queries are compared as matched-id sets; requireAll has no scoring
-    // and must agree exactly, order included.
-    const name = base();
-    const wasm = await makeIndex(TextIndex, BPlusTree, `${name}-w`);
-    const js = await makeIndex(TextIndexJS, BPlusTreeJS, `${name}-j`);
-    const N = 150;
-    for (let i = 0; i < N; i++) {
-      await wasm.add(`doc-${i}`, docText(i));
-      await js.add(`doc-${i}`, docText(i));
-    }
-
-    for (const q of ['shared', 'shared group2', 'unique42x corpus', 'common quarter0 group9']) {
-      const a = await wasm.query(q);
-      const b = await js.query(q);
-      expect(a.map((r) => r.id).sort()).toEqual(b.map((r) => r.id).sort());
-      for (const r of a) expect(r.score).toBeGreaterThan(0); // BM25 idf > 0 always
-    }
-    const aAll = await wasm.query('shared group5', { requireAll: true });
-    const bAll = await js.query('shared group5', { requireAll: true });
-    expect(aAll).toEqual(bAll);
-    await wasm.close();
-    await js.close();
-  });
 });

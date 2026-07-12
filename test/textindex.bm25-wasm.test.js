@@ -11,8 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, TextIndex, BPlusTree } from '../src/binjson-wasm.js';
-import { TextIndex as TextIndexJS } from '../src/textindex.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
+import { writeFixture } from './legacy-fixtures.js';
 import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -125,14 +124,18 @@ describe.skipIf(!hasOPFS)('WASM TextIndex BM25 scoring', () => {
 
   it('scores legacy (JS-written) indexes via the scan fallback, identically', async () => {
     const name = base();
-    const js = await makeIndex(`${name}-legacy`, TextIndexJS, BPlusTreeJS);
+    // Frozen fixtures: 25 docs of `orchard apple pear${i % 5} fruit${i}`
+    // indexed by the removed pure-JS implementation (no stats key).
+    for (const suffix of ['terms', 'documents', 'lengths']) {
+      const filename = `${name}-legacy-${suffix}.bj`;
+      if (!files.includes(filename)) files.push(filename);
+      const fh = await getFileHandle(root, filename, { create: true });
+      writeFixture(await fh.createSyncAccessHandle(), `ti-bm25-25-${suffix}.bin`);
+    }
     const native = await makeIndex(`${name}-native`);
     for (let i = 0; i < 25; i++) {
-      const text = `orchard apple pear${i % 5} fruit${i}`;
-      await js.add(`doc-${i}`, text);
-      await native.add(`doc-${i}`, text);
+      await native.add(`doc-${i}`, `orchard apple pear${i % 5} fruit${i}`);
     }
-    await js.close();
 
     // Reopen the JS-written files with the C engine: no stats key exists,
     // so avgdl comes from the per-query fallback scan — and must produce

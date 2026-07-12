@@ -15,8 +15,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, TextIndex, BPlusTree } from '../src/binjson-wasm.js';
-import { TextIndex as TextIndexJS } from '../src/textindex.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
+import { writeFixture } from './legacy-fixtures.js';
 import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -82,23 +81,21 @@ describe.skipIf(!hasOPFS)('WASM TextIndex block-partitioned postings', () => {
 
     // Linear growth: the second half costs about as much as the first.
     // The legacy layout rewrote every shared term's whole list per add,
-    // making the second half ~3x the first (quadratic cumulative bytes).
+    // making the second half ~3x the first (quadratic cumulative bytes) —
+    // measured at 596 MB vs 122 MB at 3,000 docs before its removal.
     expect(full / half).toBeLessThan(2.4);
-
-    // And it must actually beat the legacy layout on total bytes.
-    const legacyName = base();
-    const legacy = await makeIndex(TextIndexJS, BPlusTreeJS, legacyName);
-    for (let i = 0; i < N; i++) await legacy.add(`doc-${i}`, docText(i));
-    await legacy.close();
-    const legacySize = await fileSize(`${legacyName}-terms.bj`);
-    expect(full).toBeLessThan(legacySize / 2);
-  }, 90000);   // the legacy comparison index is slow to build under full-suite load
+  }, 90000);
 
   it('reads JS-written (legacy) index files and migrates on write', async () => {
     const name = base();
-    const js = await makeIndex(TextIndexJS, BPlusTreeJS, name);
-    for (let i = 0; i < 60; i++) await js.add(`doc-${i}`, docText(i));
-    await js.close();
+    // Frozen fixtures: 60 docs of docText(i) indexed by the removed pure-JS
+    // implementation (single-blob posting layout).
+    for (const suffix of ['terms', 'documents', 'lengths']) {
+      const filename = `${name}-${suffix}.bj`;
+      files.push(filename);
+      const fh = await getFileHandle(root, filename, { create: true });
+      writeFixture(await fh.createSyncAccessHandle(), `ti-blocks-60-${suffix}.bin`);
+    }
 
     // Same files, WASM implementation: legacy blobs are read directly.
     const idx = await makeIndex(TextIndex, BPlusTree, name);

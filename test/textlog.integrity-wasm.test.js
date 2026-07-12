@@ -133,6 +133,33 @@ describe.skipIf(!hasOPFS)('WASM TextLog integrity and cache', () => {
     await log.close();
   });
 
+  it('reads and extends legacy JS-written logs (frozen fixture)', async () => {
+    // Fixture provenance (see test/fixtures/generate-legacy-fixtures.mjs):
+    // six versions at diffsPerSnapshot 3, written by the removed pure-JS
+    // implementation with jsdiff patch entries.
+    const VERSIONS = [
+      'Line 1\nLine 2\nLine 3\n',
+      'Line 1\nLine 2 changed\nLine 3\n',
+      'Line 1\nLine 2 changed\nLine 3\nLine 4\n',
+      'Header\nLine 1\nLine 2 changed\nLine 3\nLine 4\n',
+      'Header\nLine 1\nLine 2 changed\nLine 3\nLine 4\nLine 5\n',
+      'no trailing newline here'
+    ];
+    const file = name();
+    writeFixture(await sync(file, true), 'textlog-v6-dps3.bin');
+
+    const log = new TextLog(await sync(file), 3);
+    await log.open();
+    expect(log.getCurrentVersion()).toBe(6);
+    for (let i = 0; i < 6; i++) {
+      expect(await log.getVersion(i + 1)).toBe(VERSIONS[i]);
+    }
+    await log.addVersion('appended by wasm');
+    expect(await log.getVersion(7)).toBe('appended by wasm');
+    expect(await log.getVersion(3)).toBe(VERSIONS[2]);   // history intact
+    await log.close();
+  });
+
   it('cache stays correct across snapshot boundaries and reopens', async () => {
     const file = name();
     const log = new TextLog(await sync(file, true), 2);   // snapshot every 2 diffs

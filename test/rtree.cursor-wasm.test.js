@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, RTree, haversineDistance } from '../src/binjson-wasm.js';
-import { RTree as RTreeJS } from '../src/rtree.js';
+import { writeFixture } from './legacy-fixtures.js';
 import { ObjectId, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -191,10 +191,9 @@ describe.skipIf(!hasOPFS)('WASM R-tree spatial cursor and kNN', () => {
 
   it('works on legacy JS-written trees', async () => {
     const file = name();
-    const js = new RTreeJS(await sync(file, true), 9);
-    await js.open();
-    for (let i = 0; i < 200; i++) await js.insert(pt(i).lat, pt(i).lng, oid(i));
-    await js.close();
+    // Frozen fixture: order 9, points pt(0..199) — written by the removed
+    // pure-JS implementation (no childBBoxes).
+    writeFixture(await sync(file, true), 'rtree-o9-200.bin');
 
     const tree = new RTree(await sync(file), 9);
     await tree.open();

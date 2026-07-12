@@ -7,12 +7,12 @@
   "exports": {
     ".": "./src/binjson.js",
     "./wasm": "./src/binjson-wasm.js",
-    "./bplustree": "./src/bplustree.js",
+    "./bplustree": "./src/binjson-wasm.js",
     "./bplustree-wasm": "./src/binjson-wasm.js",
-    "./rtree": "./src/rtree.js",
+    "./rtree": "./src/binjson-wasm.js",
     "./rtree-wasm": "./src/binjson-wasm.js",
-    "./textindex": "./src/textindex.js",
-    "./textlog": "./src/textlog.js"
+    "./textindex": "./src/binjson-wasm.js",
+    "./textlog": "./src/binjson-wasm.js"
   },
   "bin": {
     "binjson": "bin/binjson.js",

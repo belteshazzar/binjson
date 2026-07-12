@@ -8,8 +8,11 @@
  * (encode/decode/valueSize) and BinJsonFile, plus BPlusTree, RTree, TextLog,
  * TextIndex, the Porter stemmer, and the diff engine. The value types
  * (ObjectId, Pointer) and the rest of the OPFS layer are re-exported unchanged
- * from src/binjson.js — the wire format is identical, so this codec and the
- * pure-JS reference interoperate freely.
+ * from src/binjson.js — the wire format is identical, so bytes these classes
+ * write are read freely by the pure-JS codec (encode/decode/BinJsonFile) and
+ * vice versa. The data-structure logic itself lives only in C/WASM;
+ * JavaScript works with the files and memory images at the record level
+ * through src/binjson.js (BinJsonFile over an OPFS handle or MemoryHandle).
  *
  * The WASM module loads asynchronously; call and await `ready()` once (the tree
  * classes' open() does this for you) before using the synchronous codec.
@@ -19,6 +22,7 @@ import {
   TYPE,
   ObjectId,
   Pointer,
+  MemoryHandle,
   exists,
   deleteFile,
   getFileHandle
@@ -435,7 +439,7 @@ function takeOut(M, outPP, outLP) {
 
 /**
  * Persistent immutable B+ tree with append-only WASM-backed storage.
- * Mirrors the API of src/bplustree.js.
+ * Mirrors the API of the original (since removed) pure-JS implementation.
  */
 class BPlusTree {
   /**
@@ -444,7 +448,7 @@ class BPlusTree {
    *
    * The tree is durable: every add/delete writes its appended bytes straight
    * through to the file handle (matching the write-through model of
-   * src/bplustree.js), so data survives a crash before close().
+   * the original JS design), so data survives a crash before close().
    */
   constructor(syncHandle, order = 3) {
     if (order < 3) {
@@ -462,7 +466,7 @@ class BPlusTree {
    * Open the tree against the file handle. The C side is file-resident: it
    * reads nodes from the handle on demand and writes each mutation's records
    * straight through, so nothing is buffered here and data survives a crash
-   * before close() (matching the model of src/bplustree.js).
+   * before close() (matching the original JS model).
    */
   async open() {
     if (this.isOpen) {
@@ -818,7 +822,7 @@ function haversineDistance(lat1, lng1, lat2, lng2) {
 
 /**
  * Persistent on-disk R-tree with append-only WASM-backed storage.
- * Mirrors the API of src/rtree.js.
+ * Mirrors the API of the original (since removed) pure-JS implementation.
  */
 class RTree {
   /**
@@ -827,7 +831,7 @@ class RTree {
    *
    * The tree is durable: every mutation writes its appended bytes straight
    * through to the file handle (matching the write-through model of
-   * src/rtree.js), so data survives a crash before close().
+   * the original JS design), so data survives a crash before close().
    */
   constructor(syncHandle, maxEntries = 9) {
     this.syncAccessHandle = syncHandle;
@@ -846,7 +850,7 @@ class RTree {
   /**
    * Open the tree against the file handle. The C side is file-resident: it
    * reads nodes from the handle on demand and writes each mutation's records
-   * straight through (matching the model of src/rtree.js).
+   * straight through (matching the original JS model).
    */
   async open() {
     if (this.isOpen) {
@@ -1097,7 +1101,7 @@ class RTree {
 
 /**
  * Persistent versioned text log with append-only WASM-backed storage.
- * Mirrors the API of src/textlog.js.
+ * Mirrors the API of the original (since removed) pure-JS implementation.
  */
 class TextLog {
   /**
@@ -1126,7 +1130,7 @@ class TextLog {
    * Open the log against the file handle. The C side is file-resident: open
    * scans the file once to index entry offsets, then every read fetches only
    * the records it needs and every addVersion writes straight through
-   * (matching the model of src/textlog.js).
+   * (matching the original JS model).
    */
   async open() {
     if (this.isOpen) {
@@ -1274,7 +1278,7 @@ class TextLog {
   }
 }
 
-// Entry type constants (mirror src/textlog.js).
+// Entry type constants (mirror the on-disk format).
 const ENTRY_TYPE = {
   FULL_SNAPSHOT: 0x01,
   DIFF: 0x02
@@ -1285,7 +1289,7 @@ const ENTRY_TYPE = {
 // ---------------------------------------------------------------------------
 
 /**
- * WASM full-text index. Mirrors the API of src/textindex.js.
+ * WASM full-text index. Mirrors the API of the original (since removed) pure-JS implementation.
  */
 class TextIndex {
   constructor(options = {}) {
@@ -1534,6 +1538,7 @@ export {
   decode,
   valueSize,
   BinJsonFile,
+  MemoryHandle,
   exists,
   deleteFile,
   getFileHandle,

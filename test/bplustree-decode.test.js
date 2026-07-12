@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFile } from 'child_process';
-import { BPlusTree } from '../src/bplustree.js';
+import { ready, BPlusTree } from '../src/binjson-wasm.js';
 import { ObjectId, Pointer, deleteFile, getFileHandle } from '../src/binjson.js';
+
+await ready();
 
 // Set up node-opfs for Node.js environment
 let hasOPFS = false;

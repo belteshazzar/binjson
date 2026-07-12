@@ -13,8 +13,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree, RTree, TextLog } from '../src/binjson-wasm.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
-import { BinJsonFile, ObjectId, Pointer, deleteFile, getFileHandle } from '../src/binjson.js';
+import { writeFixture } from './legacy-fixtures.js';
+import { BinJsonFile, ObjectId, Pointer, encode, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
 await ready();
@@ -269,41 +269,47 @@ describe.skipIf(!hasOPFS)('WASM durability & crash recovery', () => {
     });
   });
 
-  describe('JS interop with durability records', () => {
-    it('JS reads and extends a WASM-written tree; WASM reopens the mix', async () => {
+  describe('legacy (JS-written) commit interop', () => {
+    it('a trailer-less commit appended from JS is accepted as a legacy commit', async () => {
       const file = name();
       await makeTree(file, ['w1', 'w2', 'w3']);
 
-      // The pure-JS implementation never sees the header or CRC trailers: it
-      // reads metadata at the fixed tail offset and follows pointers.
-      const js = new BPlusTreeJS(await sync(file), 4);
-      await js.open();
-      expect(await js.search('w2')).toEqual({ key: 'w2', payload: 'value of w2' });
-      await js.add('j1', { key: 'j1', payload: 'value of j1' });
-      await js.close();
+      // JavaScript appends records directly (binjson.js encode): a fresh
+      // single-leaf root plus a metadata record, with no CRC trailer —
+      // byte-for-byte what the removed JS implementation's commits looked
+      // like. Legacy readers never saw headers or trailers either way.
+      const handle = await sync(file);
+      const rootOff = handle.getSize();
+      const leaf = encode({
+        id: 90, isLeaf: true, keys: ['j1'],
+        values: [{ key: 'j1', payload: 'value of j1' }],
+        children: [], next: null
+      });
+      const meta = encode({
+        version: 1, maxEntries: 4, minEntries: 1, size: 1,
+        rootPointer: new Pointer(rootOff), nextId: 91
+      });
+      handle.write(leaf, { at: rootOff });
+      handle.write(meta, { at: rootOff + leaf.byteLength });
+      handle.flush();
+      handle.close();
 
       // WASM reopens the mixed file: the JS-written tail commit carries no
-      // trailer and is accepted as a legacy commit.
+      // trailer and is accepted as a legacy commit; mutations keep working.
       const back = new BPlusTree(await sync(file), 4);
       await back.open();
-      expect(back.size()).toBe(4);
-      expect(back.search('w1')).toBeDefined();
+      expect(back.size()).toBe(1);
       expect(back.search('j1')).toEqual({ key: 'j1', payload: 'value of j1' });
       back.add('w4', { key: 'w4', payload: 'value of w4' });
+      expect(back.size()).toBe(2);
+      expect(back.verify()).toBe(true);
       await back.close();
-
-      const js2 = new BPlusTreeJS(await sync(file), 4);
-      await js2.open();
-      expect(await js2.search('w4')).toEqual({ key: 'w4', payload: 'value of w4' });
-      await js2.close();
     });
 
     it('WASM opens a JS-written tree (no header, no trailers)', async () => {
       const file = name();
-      const js = new BPlusTreeJS(await sync(file, true), 4);
-      await js.open();
-      await js.add('legacy', { from: 'js' });
-      await js.close();
+      // Frozen fixture: order 4, one add('legacy', { from: 'js' }).
+      writeFixture(await sync(file, true), 'bpt-o4-legacy1.bin');
 
       const tree = new BPlusTree(await sync(file), 4);
       await tree.open();
