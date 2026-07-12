@@ -40,7 +40,8 @@ const ERR = {
   [-5]: 'Decoded integer exceeds safe range',
   [-6]: 'Pointer offset out of valid range',
   [-7]: 'Maximum nesting depth exceeded',
-  [-8]: 'Structural invariant violated'
+  [-8]: 'Structural invariant violated',
+  [-9]: 'Argument out of range'
 };
 
 const textEncoder = new TextEncoder();
