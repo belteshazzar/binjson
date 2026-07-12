@@ -438,8 +438,96 @@ function takeOut(M, outPP, outLP) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Order-preserving byte encoding of one scalar key part, so the B+ tree's
+ * byte-wise (memcmp) key comparison reproduces the value's natural order.
+ * Numbers encode to a 9-byte sequence (a 0x00 tag then a sign-normalized
+ * big-endian IEEE-754 double); strings to a 0x01 tag, their UTF-8 bytes, and a
+ * 0x00 terminator. The number tag sorts before the string tag, matching the
+ * tree's "numbers before strings" rule, and both forms are self-delimiting so
+ * they can be concatenated (see compositeKey). String parts must not contain
+ * U+0000 (reserved as the terminator, matching the engine's NUL convention).
+ *
+ * @param {number|string} value
+ * @returns {Uint8Array}
+ */
+function orderedKey(value) {
+  if (typeof value === 'number') {
+    if (Number.isNaN(value)) throw new Error('orderedKey: NaN has no ordering');
+    if (value === 0) value = 0; // normalize -0 to +0 so they compare equal
+    const out = new Uint8Array(9);
+    out[0] = 0x00; // number tag (sorts before strings)
+    const dv = new DataView(out.buffer);
+    dv.setFloat64(1, value, false); // big-endian
+    // Total-order transform: flip the sign bit for positives, all bits for
+    // negatives, so unsigned byte order matches numeric order.
+    if (out[1] & 0x80) { for (let i = 1; i < 9; i++) out[i] ^= 0xff; }
+    else out[1] ^= 0x80;
+    return out;
+  }
+  if (typeof value === 'string') {
+    const body = textEncoder.encode(value);
+    for (let i = 0; i < body.length; i++) {
+      if (body[i] === 0) throw new Error('orderedKey: string key must not contain U+0000');
+    }
+    const out = new Uint8Array(body.length + 2);
+    out[0] = 0x01; // string tag
+    out.set(body, 1);
+    out[out.length - 1] = 0x00; // terminator keeps prefixes ordered correctly
+    return out;
+  }
+  throw new Error(`orderedKey: unsupported part type: ${typeof value}`);
+}
+
+/**
+ * Build a composite B+ tree key from ordered parts — the convention for
+ * duplicate / secondary indexes, where the tree itself is unique-key. Encode
+ * the indexed value(s) followed by the primary key:
+ *   tree.add(compositeKey(tag, postId), postId)
+ * All entries sharing a leading value then form a contiguous range; retrieve
+ * them with a range/cursor scan whose lower bound is compositeKey(...prefix)
+ * and whose upper bound appends 0xff bytes (compositeUpperBound). The row
+ * reference lives in the value, so the composite key is never decoded back.
+ *
+ * @param {...(number|string)} parts
+ * @returns {Uint8Array}
+ */
+function compositeKey(...parts) {
+  const encoded = parts.map(orderedKey);
+  let total = 0;
+  for (const e of encoded) total += e.length;
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const e of encoded) { out.set(e, at); at += e.length; }
+  return out;
+}
+
+/**
+ * Upper bound for scanning every composite key that begins with `parts`: the
+ * prefix followed by 0xff. Because each part's encoding is self-delimiting, a
+ * real continuation always starts with a tag byte (0x00/0x01) below 0xff, so
+ * this sorts after every key extending the prefix yet before the next distinct
+ * prefix value. Use as the max bound of a range/cursor scan grouped by `parts`
+ * (bpt_range is inclusive; this sentinel is never itself a stored key).
+ *
+ * @param {...(number|string)} parts
+ * @returns {Uint8Array}
+ */
+function compositeUpperBound(...parts) {
+  const prefix = compositeKey(...parts);
+  const out = new Uint8Array(prefix.length + 1);
+  out.set(prefix, 0);
+  out[prefix.length] = 0xff;
+  return out;
+}
+
+/**
  * Persistent immutable B+ tree with append-only WASM-backed storage.
  * Mirrors the API of the original (since removed) pure-JS implementation.
+ *
+ * The tree is unique-key (add is an upsert). For duplicate / secondary-index
+ * access, store composite keys built with compositeKey()/orderedKey() and scan
+ * grouped ranges with compositeUpperBound(); string and Uint8Array keys are
+ * both accepted (Uint8Array bytes pass through verbatim).
  */
 class BPlusTree {
   /**
@@ -521,8 +609,14 @@ class BPlusTree {
     if (typeof key === 'number') {
       return { type: 0, num: key, ptr: 0, len: 0, free() {} };
     }
-    if (typeof key === 'string') {
-      const bytes = textEncoder.encode(key);
+    // A string key marshals as its UTF-8 bytes; a Uint8Array is passed
+    // verbatim (opaque byte-string key). Both are string-type keys on the C
+    // side (compared byte-for-byte), so composite / order-preserving keys
+    // built with compositeKey()/orderedKey() flow through unchanged.
+    let bytes = null;
+    if (typeof key === 'string') bytes = textEncoder.encode(key);
+    else if (key instanceof Uint8Array) bytes = key;
+    if (bytes) {
       const len = bytes.length;
       const ptr = len ? M._malloc(len) : 0;
       if (len) M.HEAPU8.set(bytes, ptr);
@@ -1722,6 +1816,9 @@ export {
   deleteFile,
   getFileHandle,
   BPlusTree,
+  orderedKey,
+  compositeKey,
+  compositeUpperBound,
   RTree,
   haversineDistance,
   TextLog,
