@@ -1,22 +1,15 @@
 {
   "name": "@belteshazzar/binjson",
-  "version": "1.0.2",
+  "version": "1.1.1",
   "description": "A compact binary encoding format for JSON data with support for Origin Private File System (OPFS) in browsers",
   "main": "src/binjson.js",
   "type": "module",
   "exports": {
     ".": "./src/binjson.js",
-    "./wasm": "./src/binjson-wasm.js",
-    "./bplustree": "./src/binjson-wasm.js",
-    "./bplustree-wasm": "./src/binjson-wasm.js",
-    "./rtree": "./src/binjson-wasm.js",
-    "./rtree-wasm": "./src/binjson-wasm.js",
-    "./textindex": "./src/binjson-wasm.js",
-    "./textlog": "./src/binjson-wasm.js"
+    "./wasm": "./src/binjson-wasm.js"
   },
   "bin": {
     "binjson": "bin/binjson.js",
-    "binjson-decode": "bin/binjson.js",
     "bplustree": "bin/bplustree.js",
     "rtree": "bin/rtree.js",
     "textindex": "bin/textindex.js",
@@ -66,7 +59,5 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "diff": "^8.0.2",
-    "stemmer": "^2.0.1"
   }
 }
