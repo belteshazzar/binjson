@@ -71,9 +71,9 @@ ALL_EXPORTS='_malloc,_free,'\
 '_rtw_size,_rtw_max_entries,'\
 '_rtw_out_ptr,_rtw_out_len,'\
 `# textlog`\
-'_tlw_create,_tlw_open,_tlw_free,'\
+'_tlw_create,_tlw_create_at,_tlw_open,_tlw_free,'\
 '_tlw_add_version,_tlw_get_version,_tlw_get_version_hash,_tlw_get_diff,'\
-'_tlw_version,_tlw_diffs_per_snapshot,'\
+'_tlw_version,_tlw_base_version,_tlw_diffs_per_snapshot,'\
 '_tlw_out_ptr,_tlw_out_len,'\
 `# diff`\
 '_diff_create_patch,_diff_get_diff,_diff_apply_patch,'\

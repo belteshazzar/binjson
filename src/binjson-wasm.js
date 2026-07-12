@@ -1107,13 +1107,19 @@ class TextLog {
   /**
    * @param {FileSystemSyncAccessHandle} syncHandle - storage file handle
    * @param {number} diffsPerSnapshot - diffs between full snapshots (default 10)
+   * @param {number} baseVersion - when creating a fresh file, the global
+   *   version this tile continues from: it owns versions (baseVersion, ...].
+   *   0 (the default) is an ordinary standalone log; only TiledTextLog passes
+   *   a nonzero value. Ignored when opening an existing file (its stored base
+   *   is adopted). See textlog_create_at.
    */
-  constructor(syncHandle, diffsPerSnapshot = 10) {
+  constructor(syncHandle, diffsPerSnapshot = 10, baseVersion = 0) {
     if (diffsPerSnapshot < 1) {
       throw new Error('diffsPerSnapshot must be at least 1');
     }
     this.syncAccessHandle = syncHandle;
     this.diffsPerSnapshot = diffsPerSnapshot;
+    this.baseVersion = baseVersion;
     this.isOpen = false;
     this.ctx = 0;
     this._fd = 0;
@@ -1147,8 +1153,9 @@ class TextLog {
         throw new Error('Failed to read metadata: no valid metadata found');
       }
       this.diffsPerSnapshot = M._tlw_diffs_per_snapshot(this.ctx);
+      this.baseVersion = M._tlw_base_version(this.ctx);
     } else {
-      this.ctx = M._tlw_create(this._fd, this.diffsPerSnapshot);
+      this.ctx = M._tlw_create_at(this._fd, this.diffsPerSnapshot, this.baseVersion);
       if (!this.ctx) {
         unregisterHandle(M, this._fd);
         throw new Error('Failed to create TextLog');
@@ -1223,8 +1230,8 @@ class TextLog {
     if (!this.isOpen) {
       throw new Error('TextLog is not open');
     }
-    if (version < 1 || version > this.version) {
-      throw new Error(`Invalid version: ${version}. Valid range: 1-${this.version}`);
+    if (version <= this.baseVersion || version > this.version) {
+      throw new Error(`Invalid version: ${version}. Valid range: ${this.baseVersion + 1}-${this.version}`);
     }
     const M = requireModule();
     const rc = M._tlw_get_version(this.ctx, version);
@@ -1242,11 +1249,11 @@ class TextLog {
     if (!this.isOpen) {
       throw new Error('TextLog is not open');
     }
-    if (fromVersion < 1 || fromVersion > this.version) {
-      throw new Error(`Invalid fromVersion: ${fromVersion}. Valid range: 1-${this.version}`);
+    if (fromVersion <= this.baseVersion || fromVersion > this.version) {
+      throw new Error(`Invalid fromVersion: ${fromVersion}. Valid range: ${this.baseVersion + 1}-${this.version}`);
     }
-    if (toVersion < 1 || toVersion > this.version) {
-      throw new Error(`Invalid toVersion: ${toVersion}. Valid range: 1-${this.version}`);
+    if (toVersion <= this.baseVersion || toVersion > this.version) {
+      throw new Error(`Invalid toVersion: ${toVersion}. Valid range: ${this.baseVersion + 1}-${this.version}`);
     }
     const M = requireModule();
     const rc = M._tlw_get_diff(this.ctx, fromVersion, toVersion);
@@ -1268,13 +1275,185 @@ class TextLog {
     if (!this.isOpen) {
       throw new Error('TextLog is not open');
     }
-    if (version < 1 || version > this.version) {
-      throw new Error(`Invalid version: ${version}. Valid range: 1-${this.version}`);
+    if (version <= this.baseVersion || version > this.version) {
+      throw new Error(`Invalid version: ${version}. Valid range: ${this.baseVersion + 1}-${this.version}`);
     }
     const M = requireModule();
     const rc = M._tlw_get_version_hash(this.ctx, version);
     if (rc !== 0) throw codeError(rc, 'getVersionHash');
     return this._readOut(M);
+  }
+}
+
+/**
+ * A versioned text log spread across multiple append-only tile files, so full
+ * history is kept while no single file grows without bound — the space lever
+ * for long-lived documents (wiki pages, blog posts) whose old revisions must
+ * stay available. Each tile is an ordinary TextLog whose metadata records the
+ * global version it continues from (baseVersion), so every tile reconstructs
+ * independently: a read opens only the tile owning the requested version, and
+ * a cold open scans only the active tile instead of the whole history.
+ *
+ * Tiling policy lives entirely here, outside the file format. The host passes a
+ * `provider` mapping tiles to storage:
+ *   - listTiles():          Promise<Array<{id, baseVersion}>>  (no file opens)
+ *   - openTile(id):         Promise<syncHandle>                (existing tile)
+ *   - createTile(baseVer):  Promise<{id, handle}>              (fresh empty file)
+ * The tiles (each identified by its baseVersion) are the manifest; the host may
+ * name files however it likes — e.g. by baseVersion — and needs no separate
+ * manifest record, since each tile's range is recoverable from its own base and
+ * current version.
+ */
+class TiledTextLog {
+  /**
+   * @param {object} provider - tile storage provider (see class docs)
+   * @param {object} [options]
+   * @param {number} [options.diffsPerSnapshot=10] - diffs between snapshots
+   * @param {number} [options.maxTileBytes=1048576] - roll to a new tile once
+   *   the active tile's file reaches this size (checked before each add)
+   * @param {number} [options.maxOpenTiles=4] - open-tile cache cap (the active
+   *   tile is always kept open)
+   */
+  constructor(provider, options = {}) {
+    const { diffsPerSnapshot = 10, maxTileBytes = 1 << 20, maxOpenTiles = 4 } = options;
+    if (diffsPerSnapshot < 1) throw new Error('diffsPerSnapshot must be at least 1');
+    if (maxTileBytes < 1) throw new Error('maxTileBytes must be positive');
+    this.provider = provider;
+    this.diffsPerSnapshot = diffsPerSnapshot;
+    this.maxTileBytes = maxTileBytes;
+    this.maxOpenTiles = Math.max(1, maxOpenTiles);
+    this.isOpen = false;
+    this.version = 0;
+    this._tiles = [];            // { id, baseVersion }, ascending by baseVersion
+    this._open = new Map();      // id -> { log: TextLog, lru: number }
+    this._lruClock = 0;
+    this._active = null;         // descriptor of the newest tile
+  }
+
+  async open() {
+    if (this.isOpen) throw new Error('TiledTextLog is already open');
+    await ready();
+    let tiles = (await this.provider.listTiles()) || [];
+    tiles = tiles.slice().sort((a, b) => a.baseVersion - b.baseVersion);
+    if (tiles.length === 0) {
+      const { id } = await this.provider.createTile(0);
+      tiles = [{ id, baseVersion: 0 }];
+    }
+    this._tiles = tiles;
+    this._active = tiles[tiles.length - 1];
+    // Open only the active tile to learn the current global version — cold
+    // open scans one tile, not the whole history.
+    const active = await this._openTile(this._active);
+    this.version = active.version;
+    this.isOpen = true;
+  }
+
+  // Fetch the tile for `desc` from the open-tile cache, opening it if needed.
+  async _openTile(desc) {
+    let entry = this._open.get(desc.id);
+    if (entry) { entry.lru = ++this._lruClock; return entry.log; }
+    const handle = await this.provider.openTile(desc.id);
+    const log = new TextLog(handle, this.diffsPerSnapshot, desc.baseVersion);
+    await log.open();
+    entry = { log, lru: ++this._lruClock };
+    this._open.set(desc.id, entry);
+    await this._evict();
+    return log;
+  }
+
+  // Keep at most maxOpenTiles tiles open; never evict the active tile.
+  async _evict() {
+    while (this._open.size > this.maxOpenTiles) {
+      let victimId = null, victimLru = Infinity;
+      for (const [id, e] of this._open) {
+        if (id === this._active.id) continue;
+        if (e.lru < victimLru) { victimLru = e.lru; victimId = id; }
+      }
+      if (victimId === null) break;
+      const e = this._open.get(victimId);
+      this._open.delete(victimId);
+      await e.log.close();
+    }
+  }
+
+  // Descriptor of the tile owning global `version` — the one with the largest
+  // baseVersion strictly below it (a tile serves versions in (base, current]).
+  _tileFor(version) {
+    let lo = 0, hi = this._tiles.length - 1, ans = this._tiles[0];
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (this._tiles[mid].baseVersion < version) { ans = this._tiles[mid]; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    return ans;
+  }
+
+  async addVersion(text) {
+    if (!this.isOpen) throw new Error('TiledTextLog is not open');
+    let active = await this._openTile(this._active);
+    // Roll to a fresh tile once the active one passes the size threshold. The
+    // new tile is anchored by writing version (this.version + 1) as a full
+    // snapshot, so no version is duplicated across the boundary. Never roll a
+    // tile that has not yet received a version of its own.
+    if (this.version > this._active.baseVersion &&
+        active.syncAccessHandle.getSize() >= this.maxTileBytes) {
+      const { id } = await this.provider.createTile(this.version);
+      const desc = { id, baseVersion: this.version };
+      this._tiles.push(desc);
+      this._active = desc;
+      active = await this._openTile(desc);
+    }
+    const v = await active.addVersion(text);
+    this.version = v;
+    return v;
+  }
+
+  async getVersion(version) {
+    this._checkRange(version);
+    const log = await this._openTile(this._tileFor(version));
+    return log.getVersion(version);
+  }
+
+  async getVersionHash(version) {
+    this._checkRange(version);
+    const log = await this._openTile(this._tileFor(version));
+    return log.getVersionHash(version);
+  }
+
+  async getDiff(fromVersion, toVersion) {
+    this._checkRange(fromVersion);
+    this._checkRange(toVersion);
+    // Reconstruct both texts (each from whichever tile owns it) and render the
+    // unified diff through the same routine TextLog.getDiff uses, so output is
+    // byte-identical whether or not the versions fall in the same tile.
+    const fromText = await this.getVersion(fromVersion);
+    const toText = await this.getVersion(toVersion);
+    return unifiedDiff(fromText, toText, fromVersion, toVersion);
+  }
+
+  _checkRange(version) {
+    if (version < 1 || version > this.version) {
+      throw new Error(`Invalid version: ${version}. Valid range: 1-${this.version}`);
+    }
+  }
+
+  /** Current (highest) global version. */
+  getCurrentVersion() { return this.version; }
+
+  /** Number of tiles the history currently spans. */
+  get tileCount() { return this._tiles.length; }
+
+  /** fsync the active tile (older tiles are immutable). */
+  flush() {
+    const e = this._open.get(this._active.id);
+    if (e) e.log.flush();
+  }
+
+  async close() {
+    if (!this.isOpen) return;
+    for (const e of this._open.values()) await e.log.close();
+    this._open.clear();
+    this.isOpen = false;
   }
 }
 
@@ -1546,6 +1725,7 @@ export {
   RTree,
   haversineDistance,
   TextLog,
+  TiledTextLog,
   ENTRY_TYPE,
   TextIndex,
   stemmer,
