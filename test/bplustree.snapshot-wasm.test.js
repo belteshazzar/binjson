@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree } from '../src/binjson-wasm.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
+import { writeFixture } from './legacy-fixtures.js';
 import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -151,10 +151,8 @@ describe.skipIf(!hasOPFS)('WASM B+ tree snapshots', () => {
 
   it('works on JS-written legacy files', async () => {
     const file = name();
-    const js = new BPlusTreeJS(await sync(file, true), 4);
-    await js.open();
-    for (let i = 0; i < 8; i++) await js.add(i, `v${i}`);
-    await js.close();
+    // Frozen legacy fixture: order-4 JS tree with keys 0..7 (`v${i}`).
+    writeFixture(await sync(file, true), 'bpt-o4-seq8.bin');
 
     const tree = await openTree(file);
     const bounds = tree.boundaries();

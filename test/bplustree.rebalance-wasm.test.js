@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree } from '../src/binjson-wasm.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
+import { writeFixture } from './legacy-fixtures.js';
 import { deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -139,17 +139,11 @@ describe.skipIf(!hasOPFS)('WASM B+ tree delete rebalancing', () => {
     await tree.close();
   });
 
-  it('absorbs hollowed-out legacy JS files, and JS reads the rebalanced result', async () => {
+  it('absorbs hollowed-out legacy JS-written files', async () => {
     const file = name();
-    {
-      // The JS reference never rebalances: hollowing out the middle leaves
-      // chains of empty leaves in the file.
-      const js = new BPlusTreeJS(await sync(file, true), 4);
-      await js.open();
-      for (let i = 0; i < 120; i++) await js.add(i, `v${i}`);
-      for (let i = 20; i < 100; i++) await js.delete(i);
-      await js.close();
-    }
+    // Frozen legacy fixture: the removed JS reference never rebalanced, so
+    // add 0..119 / delete 20..99 left chains of empty leaves in the file.
+    writeFixture(await sync(file, true), 'bpt-o4-hollow.bin');
 
     const tree = new BPlusTree(await sync(file), 4);
     await tree.open();
@@ -163,15 +157,11 @@ describe.skipIf(!hasOPFS)('WASM B+ tree delete rebalancing', () => {
       Array.from({ length: 10 }, (_, j) => 110 + j));
     tree.add(55, 'back');
     expect(tree.search(55)).toBe('back');
-    await tree.close();
 
-    // The rebalanced file is still a plain B+ tree to the JS implementation.
-    const js = new BPlusTreeJS(await sync(file), 4);
-    await js.open();
-    const entries = js.toArray();
-    expect(entries.map((e) => e.key)).toEqual(
+    // The rebalanced file reopens as a plain B+ tree.
+    expect(tree.toArray().map((e) => e.key)).toEqual(
       [55, ...Array.from({ length: 10 }, (_, j) => 110 + j)]);
-    await js.close();
+    await tree.close();
   });
 
   it('a snapshot pinned before churn is untouched by rebalancing rewrites', async () => {

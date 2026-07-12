@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ready, BPlusTree } from '../src/binjson-wasm.js';
-import { BPlusTree as BPlusTreeJS } from '../src/bplustree.js';
+import { writeFixture } from './legacy-fixtures.js';
 import { Pointer, encode, deleteFile, getFileHandle } from '../src/binjson.js';
 import { bootstrapOPFS } from './binjson.suite.js';
 
@@ -115,11 +115,8 @@ describe.skipIf(!hasOPFS)('WASM B+ tree verify', () => {
 
   it('accepts under-filled legacy JS-written files', async () => {
     const file = name();
-    const js = new BPlusTreeJS(await sync(file, true), 4);
-    await js.open();
-    for (let i = 0; i < 120; i++) await js.add(i, `v${i}`);
-    for (let i = 20; i < 100; i++) await js.delete(i);   // empty leaves remain
-    await js.close();
+    // Frozen legacy fixture: add 0..119, delete 20..99 — empty leaves remain.
+    writeFixture(await sync(file, true), 'bpt-o4-hollow.bin');
 
     const tree = await openCrafted(file);
     expect(tree.verify()).toBe(true);
