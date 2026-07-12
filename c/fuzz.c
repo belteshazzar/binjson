@@ -83,12 +83,22 @@ static int seed_bpt(dbuf *img) {
     if (!t) return -1;
     bj_builder *b = bj_builder_new();
     if (!b) { bpt_free(t); return -1; }
+    uint8_t big[400];
+    memset(big, 'v', sizeof(big));
     for (int i = 0; i < 40; i++) {
         bpt_key k = num_key(i);
-        bj_builder_reset(b);
-        bj_put_int(b, i * 10);
-        size_t n; const uint8_t *d = bj_builder_data(b, &n);
-        if (!d || bpt_add(t, &k, d, (uint32_t)n)) break;
+        int e;
+        if (i % 7 == 0) {
+            /* Over BPT_OOL_THRESHOLD: exercises out-of-line value storage
+             * (and, once mutated, corrupt OOL markers/targets). */
+            e = bpt_add(t, &k, big, (uint32_t)sizeof(big));
+        } else {
+            bj_builder_reset(b);
+            bj_put_int(b, i * 10);
+            size_t n; const uint8_t *d = bj_builder_data(b, &n);
+            e = (!d) ? BJ_ERR_STATE : bpt_add(t, &k, d, (uint32_t)n);
+        }
+        if (e) break;
     }
     bj_builder_free(b);
     bpt_free(t);
@@ -154,6 +164,16 @@ static void ex_bpt(dbuf *img) {
             bpt_delete(t, &k);
         }
         bj_builder_free(b);
+    }
+    /* A fresh out-of-line insert/search/delete against the (possibly
+     * corruption-recovered) live tree, independent of the seeded big value. */
+    {
+        uint8_t big2[350];
+        memset(big2, 'w', sizeof(big2));
+        bpt_key bk = num_key(1000.0 + (double)(rnd() % 16));
+        bpt_add(t, &bk, big2, (uint32_t)sizeof(big2));
+        bpt_search(t, &bk, &found, &p, &n);
+        bpt_delete(t, &bk);
     }
     /* Churn: a run of deletes drives leaf/internal underflow and the
      * merge/redistribute rebalancing, including root collapses. */
