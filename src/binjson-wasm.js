@@ -1801,6 +1801,52 @@ function applyPatch(source, patch) {
   }
 }
 
+/** Like takeOut, but returns the raw bytes (the delta is binary, not text). */
+function takeOutBytes(M, outPP, outLP) {
+  const outPtr = readU32(M, outPP);
+  const outLen = readU32(M, outLP);
+  const bytes = M.HEAPU8.slice(outPtr, outPtr + outLen);
+  if (outPtr) M._free(outPtr);
+  return bytes;
+}
+
+/**
+ * Binary copy/insert delta that rebuilds `target` from `source` — the compact
+ * format TextLog stores for diffs (diff.h). Returns a Uint8Array; feed it to
+ * applyDelta(source, delta) to reconstruct the target.
+ */
+function createDelta(source, target) {
+  const M = requireModule();
+  const S = writeBytes(M, source), T = writeBytes(M, target);
+  const outPP = M._malloc(4), outLP = M._malloc(4);
+  try {
+    const rc = M._diff_create_delta(S.ptr, S.len, T.ptr, T.len, outPP, outLP);
+    if (rc !== 0) throw new Error(`createDelta failed (${rc})`);
+    return takeOutBytes(M, outPP, outLP);
+  } finally {
+    M._free(S.ptr); M._free(T.ptr); M._free(outPP); M._free(outLP);
+  }
+}
+
+/** Apply a createDelta delta to `source`; returns the target string, or null
+ * if the delta is malformed / out of bounds. */
+function applyDelta(source, delta) {
+  const M = requireModule();
+  const S = writeBytes(M, source);
+  const dlen = delta.length;
+  const dptr = M._malloc(dlen || 1);
+  if (dlen) M.HEAPU8.set(delta, dptr);
+  const outPP = M._malloc(4), outLP = M._malloc(4), appliedP = M._malloc(4);
+  try {
+    const rc = M._diff_apply_delta(S.ptr, S.len, dptr, dlen, outPP, outLP, appliedP);
+    if (rc !== 0) throw new Error(`applyDelta failed (${rc})`);
+    if (readU32(M, appliedP) === 0) return null;
+    return takeOut(M, outPP, outLP);
+  } finally {
+    M._free(S.ptr); M._free(dptr); M._free(outPP); M._free(outLP); M._free(appliedP);
+  }
+}
+
 export {
   ready,
   isReady,
@@ -1828,5 +1874,7 @@ export {
   stemmer,
   createPatch,
   unifiedDiff,
-  applyPatch
+  applyPatch,
+  createDelta,
+  applyDelta
 };

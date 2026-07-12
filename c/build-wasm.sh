@@ -77,6 +77,7 @@ ALL_EXPORTS='_malloc,_free,'\
 '_tlw_out_ptr,_tlw_out_len,'\
 `# diff`\
 '_diff_create_patch,_diff_get_diff,_diff_apply_patch,'\
+'_diff_create_delta,_diff_apply_delta,'\
 `# stemmer`\
 '_stemmer_stem,'\
 `# textindex`\
