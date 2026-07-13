@@ -47,7 +47,8 @@ const ERR = {
   [-8]: 'Structural invariant violated',
   [-9]: 'Argument out of range',
   [-10]: 'Duplicate _id',
-  [-11]: 'replaceOne cannot change the _id of an existing document'
+  [-11]: 'replaceOne cannot change the _id of an existing document',
+  [-12]: 'Duplicate key: a unique index already has a document with these field values'
 };
 
 const textEncoder = new TextEncoder();
@@ -2020,16 +2021,21 @@ class Collection {
         const tree = new BPlusTree(handle, this._order);
         await tree.open();
         const n = allocStr(M, def.name);
-        const fieldsBytes = encode(def.fields);
         let rc;
         try {
-          rc = withBytes(M, fieldsBytes, (fp, flen) =>
-            M._dcw_collection_attach_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen));
+          rc = this._marshalPair(def.fields, def.partialFilterExpression, (M2, fp, flen, pp, plen) =>
+            M2._dcw_collection_attach_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen,
+                                            def.unique ? 1 : 0, def.sparse ? 1 : 0, pp, plen));
         } finally {
           n.free();
         }
         if (rc !== 0) throw codeError(rc, 'attachIndex');
-        this._indexes.set(def.name, { kind: 'equality', fields: def.fields, tree, file: def.file });
+        this._indexes.set(def.name, {
+          kind: 'equality', fields: def.fields, tree, file: def.file,
+          unique: !!def.unique, sparse: !!def.sparse,
+          partialFilterExpression: def.partialFilterExpression || null,
+          expireAfterSeconds: def.expireAfterSeconds
+        });
       } else if (kind === 'text') {
         const trees = {};
         for (const role of Object.keys(def.files)) {
@@ -2121,7 +2127,14 @@ class Collection {
   _persistIndexes() {
     const entry = this._catalog.search(this.name);
     entry.indexes = [...this._indexes.entries()].map(([name, ix]) => {
-      if (ix.kind === 'equality') return { name, kind: 'equality', fields: ix.fields, file: ix.file };
+      if (ix.kind === 'equality') {
+        const def = { name, kind: 'equality', fields: ix.fields, file: ix.file };
+        if (ix.unique) def.unique = true;
+        if (ix.sparse) def.sparse = true;
+        if (ix.partialFilterExpression) def.partialFilterExpression = ix.partialFilterExpression;
+        if (ix.expireAfterSeconds !== undefined) def.expireAfterSeconds = ix.expireAfterSeconds;
+        return def;
+      }
       if (ix.kind === 'text') return { name, kind: 'text', field: ix.field, files: ix.files };
       return { name, kind: 'geo', field: ix.field, file: ix.file };
     });
@@ -2131,19 +2144,30 @@ class Collection {
   /**
    * Create a secondary index:
    *   - equality: createIndex({ team: 1 }) or a compound createIndex({ team: 1, age: 1 }).
+   *     Options: `unique` (reject a write whose field values collide with
+   *     another document's), `sparse` (skip, don't error, a document
+   *     missing a field instead of the default all-or-nothing backfill/
+   *     maintenance), `partialFilterExpression` (a filter — only matching
+   *     documents are indexed), `expireAfterSeconds` (TTL — single-field
+   *     only; see pruneExpired()). A document skipped by sparse/
+   *     partialFilterExpression can never violate unique on that index.
    *   - text: createIndex({ body: 'text' }) — single field, BM25-scored via $text.
    *     At most one text index per collection (matches MongoDB).
    *   - geo: createIndex({ location: '2dsphere' }) — single field, GeoJSON Point
    *     values, queried via $near/$geoWithin (see docs/db-plan.md milestone 6).
    * Backfills against any existing documents — all-or-nothing for equality/geo
-   * indexes (a disqualifying field fails the whole call), but a text index
-   * tolerates documents missing the field or holding a non-string value (they
-   * just aren't text-searchable), matching MongoDB's own behavior for each.
+   * indexes (a disqualifying field, or -- for a unique index -- a pre-existing
+   * duplicate value, fails the whole call), but a text index tolerates
+   * documents missing the field or holding a non-string value (they just
+   * aren't text-searchable), matching MongoDB's own behavior for each.
    * Returns the index name (options.name, or a MongoDB-shaped default).
    */
   async createIndex(keys, options = {}) {
-    if (options.unique) throw new Error('createIndex: unique indexes are not yet supported');
     const keyFields = Object.keys(keys);
+    const isSpecial = keyFields.length === 1 && (keys[keyFields[0]] === 'text' || keys[keyFields[0]] === '2dsphere');
+    if (isSpecial && (options.unique || options.sparse || options.partialFilterExpression || options.expireAfterSeconds !== undefined)) {
+      throw new Error('createIndex: unique/sparse/partialFilterExpression/expireAfterSeconds are only supported for equality indexes');
+    }
     if (keyFields.length === 1 && keys[keyFields[0]] === 'text') {
       return this._createTextIndex(keyFields[0], options);
     }
@@ -2152,6 +2176,9 @@ class Collection {
     }
 
     const fields = checkIndexKeySpec(keys);
+    if (options.expireAfterSeconds !== undefined && fields.length !== 1) {
+      throw new Error('createIndex: expireAfterSeconds requires a single-field index');
+    }
     const name = options.name || fields.map(f => `${f}_1`).join('_');
     if (this._indexes.has(name)) throw new Error(`Index already exists: ${name}`);
 
@@ -2162,11 +2189,13 @@ class Collection {
 
     const M = requireModule();
     const n = allocStr(M, name);
-    const fieldsBytes = encode(fields);
+    const unique = !!options.unique, sparse = !!options.sparse;
+    const partialFilterExpression = options.partialFilterExpression || null;
     let rc;
     try {
-      rc = withBytes(M, fieldsBytes, (fp, flen) =>
-        M._dcw_collection_add_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen));
+      rc = this._marshalPair(fields, partialFilterExpression, (M2, fp, flen, pp, plen) =>
+        M2._dcw_collection_add_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen,
+                                     unique ? 1 : 0, sparse ? 1 : 0, pp, plen));
     } finally {
       n.free();
     }
@@ -2177,7 +2206,10 @@ class Collection {
       throw codeError(rc, 'createIndex');
     }
 
-    this._indexes.set(name, { kind: 'equality', fields, tree, file: fileName });
+    this._indexes.set(name, {
+      kind: 'equality', fields, tree, file: fileName, unique, sparse, partialFilterExpression,
+      expireAfterSeconds: options.expireAfterSeconds
+    });
     this._persistIndexes();
     return name;
   }
@@ -2278,7 +2310,14 @@ class Collection {
 
   async listIndexes() {
     return [...this._indexes.entries()].map(([name, ix]) => {
-      if (ix.kind === 'equality') return { name, key: Object.fromEntries(ix.fields.map(f => [f, 1])) };
+      if (ix.kind === 'equality') {
+        const def = { name, key: Object.fromEntries(ix.fields.map(f => [f, 1])) };
+        if (ix.unique) def.unique = true;
+        if (ix.sparse) def.sparse = true;
+        if (ix.partialFilterExpression) def.partialFilterExpression = ix.partialFilterExpression;
+        if (ix.expireAfterSeconds !== undefined) def.expireAfterSeconds = ix.expireAfterSeconds;
+        return def;
+      }
       if (ix.kind === 'text') return { name, key: { [ix.field]: 'text' } };
       return { name, key: { [ix.field]: '2dsphere' } };
     });
@@ -2443,6 +2482,29 @@ class Collection {
     const found = withBytes(M, fbytes, (p, n) => M._dcw_find_one_and_delete(this._outCtx, this._collCtx, p, n));
     if (found < 0) throw codeError(found, 'findOneAndDelete');
     return found ? this._readOut(M) : null;
+  }
+
+  /**
+   * Malloc `a`/`b` (encoded; `b` may be null/undefined for "no bytes"),
+   * call fn(M, ap, aLen, bp, bLen), free everything, and return the
+   * result. Shared by createIndex/reattach-on-open, which both need to
+   * pass an equality index's fields plus an optional
+   * partialFilterExpression across the bridge.
+   */
+  _marshalPair(a, b, fn) {
+    const M = requireModule();
+    const aBytes = encode(a);
+    const bBytes = b != null ? encode(b) : new Uint8Array(0);
+    const ap = aBytes.length ? M._malloc(aBytes.length) : 0;
+    const bp = bBytes.length ? M._malloc(bBytes.length) : 0;
+    if (aBytes.length) M.HEAPU8.set(aBytes, ap);
+    if (bBytes.length) M.HEAPU8.set(bBytes, bp);
+    try {
+      return fn(M, ap, aBytes.length, bp, bBytes.length);
+    } finally {
+      if (ap) M._free(ap);
+      if (bp) M._free(bp);
+    }
   }
 
   /**
@@ -2673,6 +2735,26 @@ class Collection {
       throw err;
     }
     return result;
+  }
+
+  /**
+   * Delete every document past its TTL cutoff, for every index created
+   * with `expireAfterSeconds` (createIndex). There is no OPFS-level cron:
+   * the host is responsible for calling this periodically (e.g.
+   * setInterval, or only from whichever tab currently holds coordinator
+   * leadership — src/db-coordinator.js) rather than this repo starting a
+   * background timer on its own. Returns the total number of documents
+   * removed across all TTL indexes.
+   */
+  async pruneExpired() {
+    let deletedCount = 0;
+    for (const ix of this._indexes.values()) {
+      if (ix.kind !== 'equality' || ix.expireAfterSeconds === undefined) continue;
+      const cutoff = new Date(Date.now() - ix.expireAfterSeconds * 1000);
+      const { deletedCount: n } = await this.deleteMany({ [ix.fields[0]]: { $lt: cutoff } });
+      deletedCount += n;
+    }
+    return deletedCount;
   }
 }
 

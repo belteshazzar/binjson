@@ -368,10 +368,9 @@ describe('db: secondary indexes (milestone 2)', () => {
     await db.close();
   });
 
-  it('rejects unique and descending index options as not yet supported', async () => {
+  it('rejects descending index fields as not yet supported (unique: see milestone 9)', async () => {
     const db = await openDb();
     const users = await db.collection('users');
-    await expect(users.createIndex({ team: 1 }, { unique: true })).rejects.toThrow(/unique/);
     await expect(users.createIndex({ team: -1 })).rejects.toThrow(/ascending/);
     await db.close();
   });
@@ -427,6 +426,20 @@ describe('db: query engine (milestone 3)', () => {
     // Multiple operators on one field are ANDed.
     expect((await users.find({ age: { $gte: 40, $lt: 60 } }).toArray()).map(d => d.name).sort())
       .toEqual(['Linus', 'Margaret']);
+    await db.close();
+  });
+
+  it('comparison operators order Date values (milestone 9 TTL prerequisite)', async () => {
+    const db = await openDb();
+    const events = await db.collection('events');
+    const t0 = new Date('2020-01-01T00:00:00.000Z');
+    const t1 = new Date('2021-01-01T00:00:00.000Z');
+    const t2 = new Date('2022-01-01T00:00:00.000Z');
+    await events.insertMany([{ at: t0, tag: 'a' }, { at: t1, tag: 'b' }, { at: t2, tag: 'c' }]);
+
+    expect((await events.find({ at: { $lt: t1 } }).toArray()).map(d => d.tag)).toEqual(['a']);
+    expect((await events.find({ at: { $gte: t1 } }).toArray()).map(d => d.tag).sort()).toEqual(['b', 'c']);
+    expect((await events.find({ at: { $gt: t0, $lt: t2 } }).toArray()).map(d => d.tag)).toEqual(['b']);
     await db.close();
   });
 
@@ -1366,6 +1379,189 @@ describe('db: CRUD completeness (milestone 8)', () => {
       const users = await db.collection('users');
       await expect(users.bulkWrite([])).rejects.toThrow();
       await db.close();
+    });
+  });
+});
+
+describe('db: index options (milestone 9)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  describe('unique', () => {
+    it('rejects a duplicate value on insert, update, and upsert', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ email: 1 }, { unique: true, name: 'email_1' });
+      await users.insertOne({ email: 'ada@example.com' });
+
+      await expect(users.insertOne({ email: 'ada@example.com' })).rejects.toThrow(/[Dd]uplicate/);
+
+      const { insertedId } = await users.insertOne({ email: 'grace@example.com' });
+      await expect(users.updateOne({ _id: insertedId }, { $set: { email: 'ada@example.com' } }))
+        .rejects.toThrow(/[Dd]uplicate/);
+      // The rejected update must not have changed the document.
+      expect((await users.findOne({ _id: insertedId })).email).toBe('grace@example.com');
+
+      await expect(users.updateOne({ email: 'nobody@example.com' }, { $set: { email: 'ada@example.com' } }, { upsert: true }))
+        .rejects.toThrow(/[Dd]uplicate/);
+      await db.close();
+    });
+
+    it('allows a value again once the conflicting document is deleted', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ email: 1 }, { unique: true });
+      const { insertedId } = await users.insertOne({ email: 'ada@example.com' });
+
+      await expect(users.insertOne({ email: 'ada@example.com' })).rejects.toThrow();
+      await users.deleteOne({ _id: insertedId });
+      await expect(users.insertOne({ email: 'ada@example.com' })).resolves.toBeTruthy();
+      await db.close();
+    });
+
+    it('createIndex fails when the collection already has duplicate values and leaves no partial index', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertOne({ email: 'ada@example.com' });
+      await users.insertOne({ email: 'ada@example.com' });
+
+      await expect(users.createIndex({ email: 1 }, { unique: true })).rejects.toThrow();
+      expect(await users.listIndexes()).toEqual([]);
+      // No index should be left half-built: creating a differently-named
+      // non-unique index on the same field must still work cleanly.
+      await expect(users.createIndex({ email: 1 })).resolves.toBeTruthy();
+      await db.close();
+    });
+
+    it('composes with partialFilterExpression: uniqueness only enforced among matching documents', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ email: 1 }, { unique: true, partialFilterExpression: { active: true } });
+
+      await users.insertOne({ email: 'ada@example.com', active: false });
+      await users.insertOne({ email: 'ada@example.com', active: false }); // both inactive: not indexed, no conflict
+      await users.insertOne({ email: 'ada@example.com', active: true });
+      await expect(users.insertOne({ email: 'ada@example.com', active: true })).rejects.toThrow();
+      await db.close();
+    });
+  });
+
+  describe('sparse', () => {
+    it('does not index (or error on) a document missing the field', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ email: 1 }, { sparse: true, name: 'email_1' });
+      await expect(users.insertOne({ name: 'no-email' })).resolves.toBeTruthy();
+      await users.insertOne({ name: 'has-email', email: 'ada@example.com' });
+      // The missing-field document never got an entry -- only the one with
+      // the field shows up via the index.
+      expect((await users.findByIndex('email_1', ['ada@example.com'])).map(d => d.name)).toEqual(['has-email']);
+      await db.close();
+    });
+
+    it('backfill tolerates pre-existing documents missing the field', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertOne({ name: 'no-email' });
+      await users.insertOne({ name: 'has-email', email: 'ada@example.com' });
+      await expect(users.createIndex({ email: 1 }, { sparse: true })).resolves.toBeTruthy();
+      expect((await users.findByIndex('email_1', ['ada@example.com'])).map(d => d.name)).toEqual(['has-email']);
+      await db.close();
+    });
+
+    it('a document removed from the index by an update does not error on removal', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ email: 1 }, { sparse: true });
+      const { insertedId } = await users.insertOne({ email: 'ada@example.com' });
+      await expect(users.updateOne({ _id: insertedId }, { $unset: { email: '' } })).resolves.toBeTruthy();
+      expect(await users.findByIndex('email_1', ['ada@example.com'])).toEqual([]);
+      await db.close();
+    });
+  });
+
+  describe('partialFilterExpression', () => {
+    it('only indexes documents matching the filter', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ team: 1 }, { partialFilterExpression: { active: true }, name: 'team_1' });
+      await users.insertOne({ team: 'core', active: true });
+      await users.insertOne({ team: 'core', active: false });
+      expect((await users.findByIndex('team_1', ['core'])).length).toBe(1);
+      await db.close();
+    });
+
+    it('an update crossing the filter boundary adds/removes the index entry', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ team: 1 }, { partialFilterExpression: { active: true }, name: 'team_1' });
+      const { insertedId } = await users.insertOne({ team: 'core', active: false });
+      expect(await users.findByIndex('team_1', ['core'])).toEqual([]);
+
+      await users.updateOne({ _id: insertedId }, { $set: { active: true } });
+      expect((await users.findByIndex('team_1', ['core'])).map(d => d._id.toHexString())).toEqual([insertedId.toHexString()]);
+
+      await users.updateOne({ _id: insertedId }, { $set: { active: false } });
+      expect(await users.findByIndex('team_1', ['core'])).toEqual([]);
+      await db.close();
+    });
+  });
+
+  describe('TTL (expireAfterSeconds)', () => {
+    it('rejects a compound key spec', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await expect(users.createIndex({ a: 1, b: 1 }, { expireAfterSeconds: 60 })).rejects.toThrow(/single-field/);
+      await db.close();
+    });
+
+    it('pruneExpired deletes only documents past the cutoff and reports the count', async () => {
+      const db = await openDb();
+      const events = await db.collection('events');
+      await events.createIndex({ createdAt: 1 }, { expireAfterSeconds: 60 });
+      await events.insertOne({ createdAt: new Date(Date.now() - 3600 * 1000), tag: 'old' });
+      await events.insertOne({ createdAt: new Date(), tag: 'recent' });
+
+      const deletedCount = await events.pruneExpired();
+      expect(deletedCount).toBe(1);
+      expect((await events.find({}).toArray()).map(d => d.tag)).toEqual(['recent']);
+      await db.close();
+    });
+
+    it('a collection with no TTL index prunes nothing', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertOne({ name: 'Ada' });
+      expect(await users.pruneExpired()).toBe(0);
+      await db.close();
+    });
+  });
+
+  describe('index options persist across close/reopen', () => {
+    it('unique/sparse/partialFilterExpression/expireAfterSeconds survive a reopen', async () => {
+      const provider = new MemoryStorageProvider();
+      const db1 = await connect(provider);
+      const users1 = await db1.collection('users');
+      await users1.createIndex({ email: 1 }, { unique: true, sparse: true, partialFilterExpression: { active: true }, name: 'email_1' });
+      await users1.createIndex({ createdAt: 1 }, { expireAfterSeconds: 60, name: 'ttl_1' });
+      await db1.close();
+
+      const db2 = await connect(provider);
+      const users2 = await db2.collection('users');
+      const indexes = await users2.listIndexes();
+      const emailIx = indexes.find(i => i.name === 'email_1');
+      expect(emailIx.unique).toBe(true);
+      expect(emailIx.sparse).toBe(true);
+      expect(emailIx.partialFilterExpression).toEqual({ active: true });
+      const ttlIx = indexes.find(i => i.name === 'ttl_1');
+      expect(ttlIx.expireAfterSeconds).toBe(60);
+
+      // Still enforced after reopen (createdAt is required: ttl_1 isn't sparse).
+      await users2.insertOne({ email: 'ada@example.com', active: true, createdAt: new Date() });
+      await expect(users2.insertOne({ email: 'ada@example.com', active: true, createdAt: new Date() }))
+        .rejects.toThrow();
+      await db2.close();
     });
   });
 });

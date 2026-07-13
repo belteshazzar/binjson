@@ -494,24 +494,97 @@ was needed.
   array-flattening/filtered; estimatedDocumentCount; bulkWrite mixed-
   operations/ordered/unordered/empty-rejected).
 
-### Milestone 9 — Index options: unique, sparse, partial, TTL — not started
+### Milestone 9 — Index options: unique, sparse, partial, TTL — ✅ COMPLETE
 
-`createIndex({..}, {unique: true})` is explicitly rejected today
-(`src/binjson-wasm.js`'s `createIndex`, `docs/db-plan.md` milestone 2).
-Needed: `unique` (reject an insert/update whose composite key already
-exists in the index — `db_keyenc.h`'s composite key already includes the id
-suffix specifically to allow duplicates, so a unique index needs its own
-key variant or a pre-insert existence check), `sparse` (skip, don't error,
-documents missing the field — today's equality-index backfill is
-all-or-nothing on a missing field, milestone 2), `partialFilterExpression`
-(only index documents matching a filter, reusing `db_query.h`'s matcher),
-and TTL (`expireAfterSeconds` — a background sweep deleting expired
-documents, needing a host-driven timer since there's no OPFS-level cron).
-Also: `createIndex` only accepts ascending (`1`) fields today
-(`checkIndexKeySpec`) — descending fields would mainly help
-`plan_equality_index`/scan direction, not correctness, so lower priority
-within this milestone. Priority: high for `unique` specifically (the most
-commonly needed constraint in real schemas), lower for sparse/partial/TTL.
+`unique`, `sparse`, `partialFilterExpression`, and `expireAfterSeconds`
+(TTL) on equality indexes. **Descending (`-1`) index fields are explicitly
+excluded** — unlike the other four, it isn't a cheap addition
+(`db_keyenc.h`'s order-preserving encoding has no per-field direction
+concept; adding one means a second encoding scheme or a direction-aware
+B+tree comparator) for a benefit already available today via
+`find().sort({field: -1})` (scan direction only, not correctness).
+Deferred further, not silently dropped.
+
+- **sparse / partialFilterExpression** share one gate,
+  `equality_index_applies` (`c/db.c`): checked by `add_to_one_index`/
+  `remove_from_one_index`'s `DC_IDX_EQUALITY` branches before touching
+  `build_index_key`/`bpt_add`/`bpt_delete` — a document that doesn't apply
+  is silently skipped, the same tolerance text/geo indexes already had for
+  a missing field (milestone 6). `backfill_index` needed no changes: it
+  already just treats `add_to_one_index`'s `BJ_OK` as "continue."
+  `build_index_key` was split into `build_index_key_prefix` (the per-field
+  value loop, no id) + itself (prefix + `qk_put_id`), so the unique check
+  below can reuse the exact same value encoding
+  `dc_collection_find_by_index` already builds for its range bound.
+- **unique**: `db_keyenc.h`'s composite key appends an id suffix
+  specifically so multiple documents can share a field-value prefix as
+  distinct B+tree keys, so `bpt_add` alone can never detect a same-value/
+  different-document conflict — `check_unique_one` range-scans
+  `[prefix, prefix+upper_bound)` (the same bound-building
+  `dc_collection_find_by_index` already does) for any entry at all.
+  **Ordering matters more than it first appeared**: an initial design that
+  only checked uniqueness inside `add_to_one_index` (reached after the
+  primary tree already had the new document) let a *rejected* duplicate
+  insert/update still leave the forbidden value sitting in the primary
+  tree, visible to `findOne`/full scans, just missing from the unique
+  index — the opposite of what the feature promises. Fixed with a second,
+  earlier check, `check_unique_indexes`, called *before* any primary/index
+  mutation (in `dc_insert_one`; in `dc_replace_one`/`dc_update_one`/
+  `dc_update_many` right after `remove_from_indexes`, which already runs
+  before the primary write and conveniently also means no self-conflict
+  exclusion is needed — the document's own old entry is already gone by
+  the time either check runs). The later, in-`add_to_one_index` check
+  stays too: it's what makes `dc_collection_add_index`'s backfill refuse a
+  `unique` index over a collection with pre-existing duplicate values,
+  matching real MongoDB's own `createIndex` behavior, with no separate
+  backfill-specific logic.
+- **TTL (`expireAfterSeconds`)** needed no new C business logic — a TTL
+  index is an ordinary single-field equality index, and expiry is just
+  milestone 8's `deleteMany({[field]: {$lt: cutoff}})` — but two
+  prerequisite gaps surfaced along the way, both scoped narrowly (not the
+  broader cross-BSON-type ordering milestone 11 still owns):
+  - `db_query.c`'s `value_cmp` only ordered number-vs-number and
+    string-vs-string; a `Date` field (`BJ_TYPE_DATE`, 8-byte int64 millis)
+    compared against a `Date` filter operand fell through to
+    "incomparable," so `$lt`/`$gt` against dates silently never matched.
+    Added a `BJ_TYPE_DATE`-vs-`BJ_TYPE_DATE` case.
+  - **Bigger discovery**: `db_keyenc.h`'s `qk_put_value` only encoded
+    INT/FLOAT/STRING into an order-preserving index key — a `Date`-valued
+    field couldn't be indexed *at all*, so `createIndex({field: 1},
+    {expireAfterSeconds})` failed the moment a document was inserted (this
+    wasn't caught during planning; only surfaced when the manual smoke
+    test tried to actually insert a document). Added a `0x03` date tag to
+    `qk_put_value` using the same signed-integer sign-bit-flip total-order
+    transform the number case already uses (bit-for-bit, just applied to a
+    plain int64 instead of an IEEE-754 double).
+  - `Collection.pruneExpired()`: deletes past-cutoff documents for every
+    `expireAfterSeconds`-tagged index. No background timer starts on its
+    own — **the host must call this periodically** (`setInterval`, or only
+    from whichever tab currently holds coordinator leadership,
+    `src/db-coordinator.js`), matching the "host-driven timer" framing and
+    avoiding a surprise side effect for a caller that didn't ask for one.
+- `Collection.createIndex`'s equality path threads `unique`/`sparse`/
+  `partialFilterExpression` through `dc_collection_attach_index`/
+  `dc_collection_add_index` (`c/db.c`/`db.h`, wider signatures — no new
+  WASM exports, the two existing `dcw_collection_attach_index`/
+  `_add_index` just grew parameters) via a new shared `_marshalPair`
+  helper (`src/binjson-wasm.js`, alongside `_marshalTriple`);
+  `expireAfterSeconds` never crosses into C at all, pure catalog
+  bookkeeping. `unique`/`sparse`/`partialFilterExpression`/
+  `expireAfterSeconds` combined with a `'text'`/`'2dsphere'` key spec is a
+  clear JS-side rejection (equality-only, matching how the milestone
+  frames all four). `listIndexes()` surfaces the set options, mirroring
+  the real driver's shape.
+- `test/db.test.js` — 15 new tests (unique: duplicate rejected on insert/
+  update/upsert without corrupting the primary document, allowed again
+  after the conflicting document is deleted, `createIndex` refuses
+  pre-existing duplicates and leaves nothing behind, composes with
+  `partialFilterExpression`; sparse: missing-field tolerance on insert/
+  backfill/removal; partialFilterExpression: only matching documents
+  indexed, add/remove entries as an update crosses the filter boundary;
+  TTL: rejects a compound key spec, `pruneExpired` deletes only past-cutoff
+  documents; index options survive close/reopen) plus 1 new query-engine
+  test proving the `Date` `value_cmp` fix independently of TTL.
 
 ### Milestone 10 — Update operator completeness — not started
 
