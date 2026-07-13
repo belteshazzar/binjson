@@ -521,7 +521,7 @@ describe('db: query engine (milestone 3)', () => {
     const db = await openDb();
     const users = await db.collection('users');
     await seedPeople(users);
-    await expect(users.find({ name: { $regex: '^A' } }).toArray()).rejects.toThrow();
+    await expect(users.find({ name: { $foo: '^A' } }).toArray()).rejects.toThrow();
     await db.close();
   });
 
@@ -607,6 +607,158 @@ describe('db: query engine (milestone 3)', () => {
     expect(orred.map(d => d.name).sort()).toEqual(['Ada', 'Grace', 'Katherine', 'Linus']);
 
     await db.close();
+  });
+});
+
+describe('db: query operator completeness (milestone 11)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  async function seedScores(users) {
+    await users.insertMany([
+      { name: 'Ada', tags: ['admin', 'core'], scores: [80, 90, 60], age: 36 },
+      { name: 'Grace', tags: ['core'], scores: [70, 95], age: 85 },
+      { name: 'Linus', tags: [], scores: [], age: 54 },
+      { name: 'Margaret', scores: [50], age: 45 } // no tags field
+    ]);
+  }
+
+  it('$size matches an array field with exactly n elements', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedScores(users);
+    expect((await users.find({ tags: { $size: 2 } }).toArray()).map(d => d.name)).toEqual(['Ada']);
+    expect((await users.find({ tags: { $size: 0 } }).toArray()).map(d => d.name)).toEqual(['Linus']);
+    // A non-array field (or a missing one) never matches, regardless of n.
+    expect(await users.find({ age: { $size: 1 } }).toArray()).toHaveLength(0);
+    await db.close();
+  });
+
+  it('$all requires every listed value present; an empty $all never matches', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedScores(users);
+    expect((await users.find({ tags: { $all: ['admin', 'core'] } }).toArray()).map(d => d.name)).toEqual(['Ada']);
+    expect((await users.find({ tags: { $all: ['admin', 'nope'] } }).toArray())).toHaveLength(0);
+    expect(await users.find({ tags: { $all: [] } }).toArray()).toHaveLength(0);
+    await db.close();
+  });
+
+  it('$type matches by MongoDB-style string alias, including array-field elements', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedScores(users);
+    expect((await users.find({ name: { $type: 'string' } }).toArray())).toHaveLength(4);
+    expect((await users.find({ age: { $type: 'number' } }).toArray())).toHaveLength(4);
+    expect((await users.find({ tags: { $type: 'array' } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Grace', 'Linus']);
+    // Array-field elements are checked too, same any-element mechanism $eq/$gt
+    // use -- Linus's scores is an empty array, so it has no int elements.
+    expect((await users.find({ scores: { $type: 'int' } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Grace', 'Margaret']);
+    await expect(users.find({ name: { $type: 'bogus' } }).toArray()).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$mod matches numeric candidates by divisor/remainder; non-numeric fields are skipped', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedScores(users);
+    // Ada (36) and Linus (54) are even; Grace (85) and Margaret (45) are odd.
+    expect((await users.find({ age: { $mod: [2, 0] } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Linus']);
+    expect(await users.find({ name: { $mod: [2, 0] } }).toArray()).toHaveLength(0);
+    await expect(users.find({ age: { $mod: [0, 0] } }).toArray()).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$elemMatch requires one element to satisfy every condition, unlike default any-element matching', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedScores(users);
+    // Ada's scores [80,90,60]: 90 alone satisfies both $gt/$lt -- $elemMatch matches.
+    expect((await users.find({ scores: { $elemMatch: { $gt: 85, $lt: 95 } } }).toArray()).map(d => d.name))
+      .toEqual(['Ada']);
+    // Contrast: the default (non-elemMatch) shape ANDs two *independent*
+    // any-element checks -- Grace's scores [70,95] matches because 95
+    // alone satisfies $gt:90 and 70 alone satisfies $lt:80, even though no
+    // *single* element satisfies both. $elemMatch above requires the same
+    // element to satisfy everything; this proves the default doesn't.
+    expect((await users.find({ scores: { $gt: 90, $lt: 80 } }).toArray()).map(d => d.name))
+      .toEqual(['Grace']);
+    expect((await users.find({ scores: { $elemMatch: { $gt: 90, $lt: 80 } } }).toArray()))
+      .toHaveLength(0); // no single element is both >90 and <80 -- correctly never matches
+
+    const db2 = await openDb();
+    const people = await db2.collection('people');
+    await people.insertMany([
+      { name: 'A', ratings: [{ score: 5, verified: true }, { score: 2, verified: false }] },
+      { name: 'B', ratings: [{ score: 5, verified: false }, { score: 2, verified: true }] }
+    ]);
+    // Query-object sub-query: one element must have BOTH score>=5 AND verified.
+    expect((await people.find({ ratings: { $elemMatch: { score: { $gte: 5 }, verified: true } } }).toArray()).map(d => d.name))
+      .toEqual(['A']);
+    await db2.close();
+    await db.close();
+  });
+
+  describe('$regex', () => {
+    async function seedNames(users) {
+      await users.insertMany([{ name: 'Ada' }, { name: 'Grace' }, { name: 'ada2' }, { name: 'Bob' }]);
+    }
+
+    it('matches a literal substring anywhere, and respects anchors', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await seedNames(users);
+      expect((await users.find({ name: { $regex: 'da' } }).toArray()).map(d => d.name).sort())
+        .toEqual(['Ada', 'ada2']);
+      expect((await users.find({ name: { $regex: '^Ada$' } }).toArray()).map(d => d.name)).toEqual(['Ada']);
+      await db.close();
+    });
+
+    it('character classes, shorthand classes, alternation, groups, and bounded repetition', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await seedNames(users);
+      expect((await users.find({ name: { $regex: '^[AG]' } }).toArray()).map(d => d.name).sort())
+        .toEqual(['Ada', 'Grace']);
+      expect((await users.find({ name: { $regex: '\\d+$' } }).toArray()).map(d => d.name)).toEqual(['ada2']);
+      expect((await users.find({ name: { $regex: '^(Ada|Bob)$' } }).toArray()).map(d => d.name).sort())
+        .toEqual(['Ada', 'Bob']);
+      expect((await users.find({ name: { $regex: '^[A-Za-z]{3}$' } }).toArray()).map(d => d.name).sort())
+        .toEqual(['Ada', 'Bob']);
+      await db.close();
+    });
+
+    it('$options "i" makes matching case-insensitive; an unsupported flag is rejected', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await seedNames(users);
+      expect((await users.find({ name: { $regex: '^ada', $options: 'i' } }).toArray()).map(d => d.name).sort())
+        .toEqual(['Ada', 'ada2']);
+      await expect(users.find({ name: { $regex: '^ada', $options: 'm' } }).toArray()).rejects.toThrow();
+      await db.close();
+    });
+
+    it('rejects $options without a sibling $regex', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await seedNames(users);
+      await expect(users.find({ name: { $options: 'i' } }).toArray()).rejects.toThrow();
+      await db.close();
+    });
+
+    it('rejects a malformed pattern instead of silently matching everything', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await seedNames(users);
+      await expect(users.find({ name: { $regex: '(unclosed' } }).toArray()).rejects.toThrow();
+      await expect(users.find({ name: { $regex: '[unclosed' } }).toArray()).rejects.toThrow();
+      await expect(users.find({ name: { $regex: 'a**' } }).toArray()).rejects.toThrow();
+      await db.close();
+    });
   });
 });
 

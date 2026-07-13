@@ -104,7 +104,7 @@ ALL_SOURCES=(
   c/geo.c c/rtree.c c/rtree_wasm.c
   c/diff.c c/textlog.c c/textlog_wasm.c
   c/stemmer.c c/textindex.c c/textindex_wasm.c
-  c/db_keyenc.c c/db_query.c c/db_update.c c/db.c c/db_wasm.c
+  c/db_keyenc.c c/regex.c c/db_query.c c/db_update.c c/db.c c/db_wasm.c
 )
 
 build_module binjson createBinjsonModule "$ALL_EXPORTS" "${ALL_SOURCES[@]}"

@@ -607,23 +607,83 @@ query-operator-condition support (`{$pull: {scores: {$lt: 5}}}`, vs.
 today's byte-equality-only) reuse `db_query.h`'s matcher for the condition
 case, similar in shape to milestone 3's planner reuse.
 
-### Milestone 11 — Query operator completeness — not started
+### Milestone 11 — Query operator completeness — ✅ COMPLETE
 
-`db_query.h` implements the comparison/logical family plus `$exists`/`$not`
-and (milestone 6) `$text`/`$near`/`$geoWithin`; an unrecognized operator is
-a hard error (never a silent no-op), so every gap below is a clean,
-discoverable addition rather than a behavior change. Missing, roughly by
-real-world frequency: `$regex` (needs a regex engine — the biggest single
-piece of new code in this milestone, unlike everything else here), `$size`
-(array length — cheap), `$all` (array superset match — cheap, reuses
-`$in`'s element-wise shape), `$elemMatch` (element-wide-AND over one array
-element, vs. today's per-operator any-element matching — a real semantic
-addition, not just a new operator), `$type`, `$mod`. Lower priority /
-larger, likely follow-on items: MongoDB's null-matches-missing quirk and
-full cross-BSON-type ordering (`db_query.h`'s top comment already documents
-both as deliberately out of scope for the comparison operators) — closing
-either changes existing matching semantics, not just adding new operators,
-so should land as its own reviewed change.
+`$size`, `$all`, `$type`, `$mod`, `$elemMatch`, `$regex`/`$options`. No new
+WASM exports and no JS changes at all — every operator is reached through
+the existing `qry_matches` → `dc_find`/etc. paths, which already pass
+opaque filter bytes through unchanged (same as milestone 6's `$text`/
+`$near`). Explicitly **not** in this milestone (per the original plan,
+changing existing matching semantics rather than adding new operators):
+MongoDB's null-matches-missing quirk and full cross-BSON-type ordering.
+
+- **`$size`/`$all`/`$type`/`$mod`** were each cheap, as expected: `$size`
+  uses `array_begin`'s element count directly (no need to walk elements);
+  `$all` reuses `op_eq` (like `$in`, but AND instead of OR — an empty
+  `$all` never matches, matching real MongoDB); `$type` is a small new
+  MongoDB-familiar string-alias table (`"string"`/`"number"`/`"int"`/
+  `"double"`/`"bool"`/`"date"`/`"objectId"`/`"array"`/`"object"`/`"null"`
+  — not BSON's numeric type codes, which don't fit a JS-facing API) that
+  reuses `cands` like `$eq`/`$gt` already do (so array-field elements are
+  checked too, for free); `$mod` truncates both operands to `int64_t`
+  (matches real MongoDB's own truncating behavior).
+- **`$elemMatch`** needed a genuine new plumbing path: unlike every other
+  operator's any-element-independently matching, its sub-query must hold
+  *entirely* against **one** element (element-wide AND). Needed threading
+  the field's own raw resolved value (`raw_vp`/`raw_vl`, is it literally
+  an ARRAY? individual element spans?) into `eval_operator_expr`
+  alongside the existing flattened `cands` — `$size` needed this too.
+  Two sub-query shapes, detected via the same `qry_is_operator_expr` top-
+  level filters already use: an operator expression against a scalar
+  array (builds a per-element `cands`, recurses into
+  `eval_operator_expr`) or a plain query object against an array of
+  subdocuments (recurses into `eval_filter` directly, treating the
+  element's own bytes as the "document" — reuses the top-level recursive
+  evaluator with no new machinery).
+- **`$regex`/`$options`**: new self-contained module `c/regex.h`/
+  `c/regex.c` (mirrors `c/geo.c`/`c/stemmer.c`'s precedent for a
+  standalone algorithmic piece) — a small backtracking regex engine
+  (literals, `.`, `\d\D\w\W\s\S`, `[...]`/`[^...]` classes with ranges,
+  `*+?`, `{n}`/`{n,}`/`{n,m}`, `^$` anchors, `(...)` grouping, `|`
+  alternation, `i` case-insensitivity; deliberately not backreferences/
+  lookaround/named-or-capturing-groups/non-greedy quantifiers/Unicode-
+  aware classes — see `regex.h`'s top comment). Only the operator-
+  expression form is supported (`{$regex: "pattern", $options: "flags"}`,
+  both plain strings) since binjson has no BSON-regex wire type to carry
+  a bare native `RegExp` literal. `$options` needed its own small
+  pre-scan (`find_options`) since it's a modifier paired with `$regex` in
+  the same operator-expression object, not a standalone operator the
+  existing per-key dispatch loop could just switch on.
+  - **Correctness bug caught by writing a standalone test harness before
+    wiring the engine into `db_query.c`** (not by planning, and not by
+    the eventual `db.test.js` suite either — a 5000-character subject
+    with nothing more exotic than `a*b` was the smallest repro): the
+    first VM design used C recursion for backtracking (each `I_SPLIT`
+    "try again" was a recursive call), so a greedy quantifier's stack
+    depth scaled with *subject length* — overflowing the ~1MB WASM stack
+    on a multi-KB text field, a routine case for `$regex` against any
+    real body/description-shaped field, not an edge case. Fixed by
+    rewriting the VM to use an explicit heap-allocated backtrack-point
+    stack (a standard recursion→iteration transform — a LIFO explicit
+    stack exactly replicates recursive depth-first order) instead of the
+    C call stack, bounded only by heap memory. A separate total-step
+    budget (not a depth cap) now guards against pathologically slow
+    *(catastrophic-backtracking-shaped)* patterns like `(a+)+b`, erroring
+    loudly rather than hanging — verified directly against both cases
+    (a 5000-char matching/non-matching subject, and a classic
+    catastrophic-backtracking pattern) before the engine was ever wired
+    into `db_query.c`.
+- `test/db.test.js` — 10 new tests (`$size`/`$all`/`$type`/`$mod` each;
+  `$elemMatch`'s element-wide-AND explicitly contrasted against the
+  default any-element-independently matching two stacked conditions
+  would give, for both a scalar-array and a subdocument-array shape;
+  `$regex` literal/anchored/class/shorthand-class/alternation/group/
+  bounded-repetition matching, `$options: 'i'`, an unsupported flag
+  rejected, `$options` without `$regex` rejected, and malformed patterns
+  — unbalanced `(`/`[`, a bare `**` — rejected rather than silently
+  matching everything). A pre-existing milestone-3 test that used
+  `$regex` as its "this isn't implemented yet" example was updated to use
+  a different placeholder operator, now that `$regex` is real.
 
 ### Milestone 12 — Full multi-document transactions (sessions) — not doing (for now)
 
