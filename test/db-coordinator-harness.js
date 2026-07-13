@@ -43,6 +43,20 @@ async function run(cmd, args) {
       }
       return coll[args.method](...(args.args || []));
     }
+    // Starts a change stream and forwards every change back as an
+    // unsolicited {change: <encoded>} message (no `id` -- not a response to
+    // this particular request) rather than trying to return the
+    // ChangeStream itself, which isn't binjson-encodable.
+    case 'watch': {
+      const coll = await sharedDb.collection(args.collection);
+      const stream = coll.watch();
+      (async () => {
+        for await (const change of stream) {
+          self.postMessage({ change: encode(change) });
+        }
+      })();
+      return null;
+    }
     case 'close':
       if (sharedDb) await sharedDb.close();
       return null;

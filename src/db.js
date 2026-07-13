@@ -12,6 +12,7 @@
 export {
   Db,
   Collection,
+  ChangeStream,
   MemoryStorageProvider,
   OPFSStorageProvider,
   connect

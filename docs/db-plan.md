@@ -766,14 +766,76 @@ commit. Substantial new design, not just an extension of milestone 5's
 journal. Deprioritized like milestone 7 (aggregation) — revisit only if a
 concrete multi-collection-atomicity use case shows up.
 
-### Not planned: change streams (`watch()`)
+### Milestone 13 — Change streams (`watch()`) — ✅ COMPLETE
 
-Real MongoDB's change streams tail the replication oplog, which has no
-analog in a single-process embedded store. A reinterpreted local version
-(an in-process `EventEmitter`-style hook firing after each committed write,
-no resume tokens/durability across restarts) would be cheap to add
-whenever a concrete need appears, but is a different feature from the real
-API, not a gap in it — not tracked as a milestone.
+Superseded the "not planned" note this section used to carry: real
+MongoDB's change streams tail the replication oplog (no analog in a
+single-process embedded store, and no resume tokens/durability across
+restarts here either), but a reinterpreted local version — an in-process
+hook firing after each committed write, plus rebroadcasting it to every
+other tab sharing a database via `src/db-coordinator.js` — was exactly the
+"cheap to add whenever a concrete need appears" version this note already
+anticipated, once a concrete need (a live-updating multi-tab demo) showed
+up. **Entirely JS-side, no C/WASM changes** — this isn't "database logic"
+(catalog/CRUD/filter matching/indexing), it's an observability layer
+bolted onto already-completed operations, same reasoning `$currentDate`
+(milestone 10) already used for a host-only concern.
+
+- **`ChangeStream`** (`src/binjson-wasm.js`, exported): a dual
+  EventEmitter-lite (`.on('change', cb)`)/async-iterator (`for await`)
+  object, plus `.close()`. `Collection.watch(pipeline, options)` (no
+  pipeline/`$match` support yet — an explicit, documented scope limit;
+  filter inside your own `on('change', cb)`) creates one, tracked in a new
+  `Collection._watchers` set; `_emitChange()` is a no-op fast path when
+  nothing is watching, so the feature costs nothing unless used.
+- **Change event shape**: `{ operationType: 'insert'|'update'|'replace'|
+  'delete', ns: { coll }, documentKey: { _id }, fullDocument }`
+  (`fullDocument` absent for `delete`). No `updateDescription` (would need
+  diffing before/after images — skipped as a documented scope limit,
+  favoring a smaller correct surface over a bigger approximate one).
+- **Cost model**: free wherever the post-image is already known
+  client-side (`insertOne`/`insertMany`/`replaceOne`'s matched-or-upserted
+  body, `findOneAndReplace`). `updateOne`/`updateMany`/`deleteOne`/
+  `deleteMany` need the affected id(s) *before* the mutation runs (the
+  filter may no longer match afterward) — free when the filter already
+  names `_id` directly, one extra `findOne`/`find` otherwise, and only
+  ever attempted when `_watchers.size > 0`. `updateMany` with active
+  watchers costs `O(matched)` extra round trips (one post-image lookup per
+  affected document) — acceptable for a demo/observability feature, not a
+  hot path, and documented as such in code.
+- **Documented simplification**: `findOneAndUpdate`/`findOneAndReplace`
+  always emit `'update'`/`'replace'`, never distinguishing an
+  upsert-triggered insert from a genuine match (unlike `updateOne`/
+  `updateMany`/`replaceOne`, which do distinguish it for free via their
+  own return code) — disambiguating here would need a C-side return-code
+  change, out of scope for a JS-only feature.
+- **Cross-tab propagation** (`src/db-coordinator.js`): the leader already
+  routes every write — its own local calls *and* every follower's proxied
+  RPC — through the same cached `Collection` instances (`Db._collections`
+  caches by name), so subscribing once per collection name at the leader
+  (`Coordinator._ensureRebroadcast`) sees every write regardless of origin
+  tab. Rebroadcasts via a new `{type: 'change', collectionName, payload}`
+  `BroadcastChannel` message. **Bug caught during implementation**:
+  `BroadcastChannel` never delivers a context's own messages back to
+  itself (already true of this file's RPC path, per its own existing
+  comment) — so the *leader* tab's own `SharedCollection.watch()` calls
+  would never have seen their own writes without also delivering locally
+  (`Coordinator._deliverChange`, called both from the rebroadcast callback
+  and from the `'change'` message handler).
+- Tests: `test/db.test.js`'s `change streams (watch)` block (single
+  connection: every CRUD method's event shape, multiple concurrent
+  watchers, `on()` + `for await`, `close()`, pipeline rejection, and a
+  spy-verified zero-extra-`findOne`-calls check for the "free when
+  unwatched" claim); `test/db-coordinator.test.js` (Node-native
+  `navigator.locks`/`BroadcastChannel`, no browser: cross-tab delivery in
+  both directions, including the leader-self-delivery fix, and multiple
+  event types in sequence); one new case in
+  `test/db-coordinator.browser.test.js` (real Chromium) confirming the
+  same across real Workers.
+- **Demo** (the concrete need that prompted this): `public/db.html` +
+  `public/db-worker.js` — a small notes list backed by `connectShared`;
+  open the page in two or more tabs and inserts/deletes in one appear live
+  in the others via `watch()`. Served by `npm run serve`, no build step.
 
 ## Open decisions / risks not yet addressed
 

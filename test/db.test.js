@@ -3,7 +3,7 @@
  * primitives (insertOne/findOne/find/deleteOne/replaceOne/countDocuments)
  * on top of the persistent B+ tree, no secondary indexes yet.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ready } from '../src/binjson-wasm.js';
 import { ObjectId } from '../src/binjson.js';
 import { connect, MemoryStorageProvider, OPFSStorageProvider } from '../src/db.js';
@@ -1208,6 +1208,213 @@ describe('db: update operator completeness (milestone 10)', () => {
 
     await users.updateOne({ _id: insertedId }, { $pull: { scores: 10 } });
     expect((await users.findOne({ _id: insertedId })).scores).toEqual([15]);
+    await db.close();
+  });
+});
+
+describe('db: change streams (watch)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  /** Drains exactly `count` change events already queued/incoming on `stream`. */
+  async function drain(stream, count) {
+    const out = [];
+    for (let i = 0; i < count; i++) out.push((await stream.next()).value);
+    return out;
+  }
+
+  it('insertOne/insertMany emit one insert event per document', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const stream = users.watch();
+
+    const { insertedId } = await users.insertOne({ name: 'Ada' });
+    const [c1] = await drain(stream, 1);
+    expect(c1).toEqual({
+      ns: { coll: 'users' },
+      operationType: 'insert',
+      documentKey: { _id: insertedId },
+      fullDocument: { _id: insertedId, name: 'Ada' }
+    });
+
+    const { insertedIds } = await users.insertMany([{ name: 'Grace' }, { name: 'Linus' }]);
+    const [c2, c3] = await drain(stream, 2);
+    expect(c2.operationType).toBe('insert');
+    expect(c2.documentKey._id.equals(insertedIds[0])).toBe(true);
+    expect(c3.fullDocument.name).toBe('Linus');
+
+    stream.close();
+    await db.close();
+  });
+
+  it('updateOne emits update on a match and insert on an upsert', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+    const stream = users.watch();
+
+    await users.updateOne({ _id: insertedId }, { $set: { team: 'kernel' } });
+    const [matched] = await drain(stream, 1);
+    expect(matched.operationType).toBe('update');
+    expect(matched.documentKey._id.equals(insertedId)).toBe(true);
+    expect(matched.fullDocument.team).toBe('kernel');
+
+    // A filter not already keyed on _id still resolves the right document.
+    await users.updateOne({ name: 'Ada' }, { $set: { team: 'platform' } });
+    const [byFilter] = await drain(stream, 1);
+    expect(byFilter.operationType).toBe('update');
+    expect(byFilter.fullDocument.team).toBe('platform');
+
+    const result = await users.updateOne({ name: 'Ghost' }, { $set: { seen: true } }, { upsert: true });
+    const [upserted] = await drain(stream, 1);
+    expect(upserted.operationType).toBe('insert');
+    expect(upserted.documentKey._id.equals(result.upsertedId)).toBe(true);
+    expect(upserted.fullDocument.seen).toBe(true);
+
+    stream.close();
+    await db.close();
+  });
+
+  it('updateMany emits one update event per matched document, and insert on an upsert', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await users.insertOne({ name: 'Ada', team: 'core' });
+    await users.insertOne({ name: 'Grace', team: 'core' });
+    await users.insertOne({ name: 'Linus', team: 'kernel' });
+    const stream = users.watch();
+
+    await users.updateMany({ team: 'core' }, { $set: { onCall: true } });
+    const changes = await drain(stream, 2);
+    expect(changes.every((c) => c.operationType === 'update')).toBe(true);
+    expect(changes.map((c) => c.fullDocument.name).sort()).toEqual(['Ada', 'Grace']);
+
+    await users.updateMany({ team: 'ghosts' }, { $set: { seen: true } }, { upsert: true });
+    const [upserted] = await drain(stream, 1);
+    expect(upserted.operationType).toBe('insert');
+    expect(upserted.fullDocument.team).toBe('ghosts');
+
+    stream.close();
+    await db.close();
+  });
+
+  it('replaceOne emits replace on a match and insert on an upsert', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+    const stream = users.watch();
+
+    await users.replaceOne({ _id: insertedId }, { name: 'Ada Lovelace' });
+    const [replaced] = await drain(stream, 1);
+    expect(replaced.operationType).toBe('replace');
+    expect(replaced.fullDocument).toEqual({ _id: insertedId, name: 'Ada Lovelace' });
+
+    const result = await users.replaceOne({ name: 'Ghost' }, { name: 'New Ghost' }, { upsert: true });
+    const [upserted] = await drain(stream, 1);
+    expect(upserted.operationType).toBe('insert');
+    expect(upserted.documentKey._id.equals(result.upsertedId)).toBe(true);
+
+    stream.close();
+    await db.close();
+  });
+
+  it('deleteOne/deleteMany emit delete events with documentKey only (no fullDocument)', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+    await users.insertOne({ name: 'Grace', team: 'core' });
+    await users.insertOne({ name: 'Linus', team: 'kernel' });
+    const stream = users.watch();
+
+    await users.deleteOne({ _id: insertedId });
+    const [deleted] = await drain(stream, 1);
+    expect(deleted).toEqual({ ns: { coll: 'users' }, operationType: 'delete', documentKey: { _id: insertedId } });
+
+    await users.deleteMany({ team: 'core' });
+    const [remaining] = await drain(stream, 1);
+    expect(remaining.operationType).toBe('delete');
+
+    stream.close();
+    await db.close();
+  });
+
+  it('findOneAndUpdate/findOneAndReplace/findOneAndDelete each emit the right event', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+    const stream = users.watch();
+
+    await users.findOneAndUpdate({ _id: insertedId }, { $set: { team: 'kernel' } });
+    const [updated] = await drain(stream, 1);
+    expect(updated.operationType).toBe('update');
+    expect(updated.fullDocument.team).toBe('kernel'); // post-image even though returnDocument defaults to 'before'
+
+    await users.findOneAndReplace({ _id: insertedId }, { name: 'Ada Lovelace' });
+    const [replaced] = await drain(stream, 1);
+    expect(replaced.operationType).toBe('replace');
+    expect(replaced.fullDocument).toEqual({ _id: insertedId, name: 'Ada Lovelace' });
+
+    await users.findOneAndDelete({ _id: insertedId });
+    const [deleted] = await drain(stream, 1);
+    expect(deleted.operationType).toBe('delete');
+    expect(deleted.documentKey._id.equals(insertedId)).toBe(true);
+
+    stream.close();
+    await db.close();
+  });
+
+  it('supports multiple concurrent watchers, on() plus for-await, and stops after close()', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const streamA = users.watch();
+    const streamB = users.watch();
+
+    const seenByA = [];
+    streamA.on('change', (c) => seenByA.push(c));
+
+    await users.insertOne({ name: 'Ada' });
+    await new Promise((r) => setImmediate(r)); // let the on()-callback microtask flush
+    expect(seenByA).toHaveLength(1);
+    expect(seenByA[0].operationType).toBe('insert');
+
+    const [viaB] = await drain(streamB, 1);
+    expect(viaB.operationType).toBe('insert');
+
+    streamA.close();
+    await users.insertOne({ name: 'Grace' });
+    await new Promise((r) => setImmediate(r));
+    expect(seenByA).toHaveLength(1); // closed stream received nothing further
+
+    const collected = [];
+    (async () => {
+      for await (const change of streamB) collected.push(change);
+    })(); // not awaited: for-await only resolves when the stream closes
+    await new Promise((r) => setImmediate(r));
+    expect(collected).toHaveLength(1);
+    expect(collected[0].fullDocument.name).toBe('Grace');
+
+    streamB.close();
+    await db.close();
+  });
+
+  it('rejects a non-empty pipeline (not supported yet)', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    expect(() => users.watch([{ $match: { operationType: 'insert' } }])).toThrow();
+    await db.close();
+  });
+
+  it('costs nothing when nothing is watching: no extra findOne calls', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+    const spy = vi.spyOn(users, 'findOne');
+
+    await users.updateOne({ name: 'Ada' }, { $set: { team: 'kernel' } });
+    await users.deleteOne({ _id: insertedId });
+    expect(spy).not.toHaveBeenCalled();
+
+    spy.mockRestore();
     await db.close();
   });
 });

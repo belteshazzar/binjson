@@ -42,7 +42,7 @@
  * one RPC call on `.toArray()`, matching the real cursor's own laziness.
  */
 import { encode, decode } from './binjson.js';
-import { connect } from './db.js';
+import { connect, ChangeStream } from './db.js';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const REELECT_WAIT_MS = 2000;
@@ -57,11 +57,16 @@ function channelName(dbName) { return `binjson-db-coord:${dbName}`; }
  * Collection.find() returns a lazy cursor rather than a promise — RPC
  * always wants the fully resolved array. Shared by the leader's own local
  * calls and its handling of followers' `request` messages, so there is
- * exactly one execution path regardless of who is asking.
+ * exactly one execution path regardless of who is asking. `coordinator`,
+ * when given, subscribes once per collection name to rebroadcast that
+ * collection's watch() change events to every other tab (see
+ * Coordinator._ensureRebroadcast) — every write, whether local or a
+ * follower's proxied RPC, passes through here.
  */
-async function executeOnRealDb(realDb, collectionName, method, args) {
+async function executeOnRealDb(realDb, collectionName, method, args, coordinator) {
   if (collectionName === null) return realDb[method](...args);
   const coll = await realDb.collection(collectionName);
+  if (coordinator) coordinator._ensureRebroadcast(collectionName, coll);
   if (method === 'find') {
     const [filter, options] = args;
     return coll.find(filter, options).toArray();
@@ -81,6 +86,8 @@ class Coordinator {
     this._heartbeatTimer = null;
     this._resolveHold = null;
     this._closed = false;
+    this._rebroadcasting = new Set(); // collection names already subscribed for rebroadcast (leader only)
+    this._changeListeners = new Map(); // collectionName -> Set<ChangeStream>, this context's own watch() callers
 
     this.channel.addEventListener('message', (event) => this._onMessage(event.data));
   }
@@ -168,17 +175,57 @@ class Coordinator {
         else p.resolve(decode(msg.payload));
         return;
       }
+      case 'change':
+        this._deliverChange(msg.collectionName, decode(msg.payload));
+        return;
     }
   }
 
   async _handleRequest(msg) {
     const [collectionName, method, args] = decode(msg.payload);
     try {
-      const result = await executeOnRealDb(this.realDb, collectionName, method, args);
+      const result = await executeOnRealDb(this.realDb, collectionName, method, args, this);
       this.channel.postMessage({ type: 'response', requestId: msg.requestId, payload: encode(result === undefined ? null : result) });
     } catch (err) {
       this.channel.postMessage({ type: 'error', requestId: msg.requestId, payload: encode({ message: err.message }) });
     }
+  }
+
+  /**
+   * Subscribe (once per collection name) to the leader's own real
+   * Collection's watch() feed and rebroadcast every change to the whole
+   * BroadcastChannel -- plus deliver it locally, since BroadcastChannel
+   * never delivers a context's own messages back to itself (see
+   * _rpcCall's identical note), which would otherwise silently drop events
+   * from a SharedCollection.watch() call made by the leader's own tab.
+   */
+  _ensureRebroadcast(collectionName, coll) {
+    if (this._rebroadcasting.has(collectionName)) return;
+    this._rebroadcasting.add(collectionName);
+    coll.watch().on('change', (change) => {
+      this.channel.postMessage({ type: 'change', collectionName, payload: encode(change) });
+      this._deliverChange(collectionName, change);
+    });
+  }
+
+  _deliverChange(collectionName, change) {
+    const listeners = this._changeListeners.get(collectionName);
+    if (!listeners) return;
+    for (const stream of listeners) stream._emit(change);
+  }
+
+  /** Backs SharedCollection.watch(). */
+  watch(collectionName) {
+    const stream = new ChangeStream(() => {
+      const set = this._changeListeners.get(collectionName);
+      if (!set) return;
+      set.delete(stream);
+      if (set.size === 0) this._changeListeners.delete(collectionName);
+    });
+    let set = this._changeListeners.get(collectionName);
+    if (!set) { set = new Set(); this._changeListeners.set(collectionName, set); }
+    set.add(stream);
+    return stream;
   }
 
   async _rpcCall(collectionName, method, args, retried = false) {
@@ -187,7 +234,7 @@ class Coordinator {
     // flight, a broadcast request it sent as a follower will never be
     // answered (BroadcastChannel never delivers a context's own messages
     // back to itself) -- serve locally instead of retrying over the wire.
-    if (this.role === 'leader') return executeOnRealDb(this.realDb, collectionName, method, args);
+    if (this.role === 'leader') return executeOnRealDb(this.realDb, collectionName, method, args, this);
     const requestId = crypto.randomUUID();
     const payload = encode([collectionName, method, args]);
     const result = new Promise((resolve, reject) => this.pending.set(requestId, { resolve, reject }));
@@ -215,7 +262,7 @@ class Coordinator {
   }
 
   async dispatch(collectionName, method, args) {
-    if (this.role === 'leader') return executeOnRealDb(this.realDb, collectionName, method, args);
+    if (this.role === 'leader') return executeOnRealDb(this.realDb, collectionName, method, args, this);
     return this._rpcCall(collectionName, method, args);
   }
 
@@ -225,6 +272,10 @@ class Coordinator {
     if (this._heartbeatTimer) clearInterval(this._heartbeatTimer);
     for (const { reject } of this.pending.values()) reject(new Error('db-coordinator: closed'));
     this.pending.clear();
+    for (const set of this._changeListeners.values()) {
+      for (const stream of [...set]) stream.close();
+    }
+    this._changeListeners.clear();
     if (this.role === 'leader' && this.realDb) await this.realDb.close();
     if (this._abortController) this._abortController.abort(); // cancel the lock request if still queued
     if (this._resolveHold) this._resolveHold(); // release the Web Lock, if held
@@ -272,6 +323,17 @@ class SharedCollection {
   async updateOne(filter, update, options = {}) { return this._coord.dispatch(this.name, 'updateOne', [filter, update, options]); }
   async updateMany(filter, update, options = {}) { return this._coord.dispatch(this.name, 'updateMany', [filter, update, options]); }
   async countDocuments(filter = {}) { return this._coord.dispatch(this.name, 'countDocuments', [filter]); }
+
+  /** Same shape/scope limits as Collection.watch() (src/binjson-wasm.js),
+   * but sees writes from every tab sharing this database, not just this
+   * one -- the leader rebroadcasts its real Collection's change events to
+   * every other tab (see Coordinator._ensureRebroadcast). */
+  watch(pipeline = [], options = {}) {
+    if (pipeline.length) {
+      throw new Error('SharedCollection.watch: pipeline stages are not supported yet');
+    }
+    return this._coord.watch(this.name);
+  }
 }
 
 class SharedDb {

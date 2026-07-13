@@ -121,6 +121,98 @@ describe('db-coordinator: election, RPC, and handover logic', () => {
     await Promise.all(survivors.map((d) => d.close()));
   });
 
+  it('a follower\'s watch() sees a write made through the leader', async () => {
+    const provider = new MemoryStorageProvider();
+    const dbName = nextDbName();
+    const dbs = await Promise.all([
+      connectShared(dbName, provider, {}),
+      connectShared(dbName, provider, {})
+    ]);
+    const leader = dbs.find((d) => d._coord.role === 'leader');
+    const follower = dbs.find((d) => d !== leader);
+
+    const followerUsers = await follower.collection('users');
+    const stream = followerUsers.watch();
+
+    const leaderUsers = await leader.collection('users');
+    const { insertedId } = await leaderUsers.insertOne({ name: 'Ada' });
+
+    const { value: change, done } = await stream.next();
+    expect(done).toBe(false);
+    expect(change.operationType).toBe('insert');
+    expect(change.documentKey._id.equals(insertedId)).toBe(true);
+    expect(change.fullDocument.name).toBe('Ada');
+
+    stream.close();
+    await Promise.all(dbs.map((d) => d.close()));
+  });
+
+  it('the leader\'s own watch() sees a write made through a follower (BroadcastChannel self-delivery fix)', async () => {
+    const provider = new MemoryStorageProvider();
+    const dbName = nextDbName();
+    const dbs = await Promise.all([
+      connectShared(dbName, provider, {}),
+      connectShared(dbName, provider, {})
+    ]);
+    const leader = dbs.find((d) => d._coord.role === 'leader');
+    const follower = dbs.find((d) => d !== leader);
+
+    const leaderUsers = await leader.collection('users');
+    const stream = leaderUsers.watch();
+
+    const followerUsers = await follower.collection('users');
+    await followerUsers.insertOne({ name: 'Grace' });
+
+    const { value: change } = await stream.next();
+    expect(change.operationType).toBe('insert');
+    expect(change.fullDocument.name).toBe('Grace');
+
+    stream.close();
+    await Promise.all(dbs.map((d) => d.close()));
+  });
+
+  it('watch() delivers update and delete events across tabs, and stops after close()', async () => {
+    const provider = new MemoryStorageProvider();
+    const dbName = nextDbName();
+    const dbs = await Promise.all([
+      connectShared(dbName, provider, {}),
+      connectShared(dbName, provider, {})
+    ]);
+    const leader = dbs.find((d) => d._coord.role === 'leader');
+    const follower = dbs.find((d) => d !== leader);
+
+    // watch() is registered before any writes happen, on purpose: the
+    // 'change' rebroadcast is itself an async BroadcastChannel message, so
+    // watching only *after* an earlier write's own promise resolves would
+    // race that write's still-in-flight rebroadcast.
+    const followerUsers = await follower.collection('users');
+    const stream = followerUsers.watch();
+
+    const leaderUsers = await leader.collection('users');
+    const { insertedId } = await leaderUsers.insertOne({ name: 'Ada', team: 'core' });
+    const insertChange = (await stream.next()).value;
+    expect(insertChange.operationType).toBe('insert');
+
+    await leaderUsers.updateOne({ _id: insertedId }, { $set: { team: 'kernel' } });
+    const updateChange = (await stream.next()).value;
+    expect(updateChange.operationType).toBe('update');
+    expect(updateChange.fullDocument.team).toBe('kernel');
+
+    await leaderUsers.deleteOne({ _id: insertedId });
+    const deleteChange = (await stream.next()).value;
+    expect(deleteChange.operationType).toBe('delete');
+    expect(deleteChange.documentKey._id.equals(insertedId)).toBe(true);
+
+    stream.close();
+    await leaderUsers.insertOne({ name: 'Ignored' });
+    // No await-able signal that "nothing more arrives", so just confirm the
+    // stream itself reports closed rather than racing a timeout.
+    const afterClose = await stream.next();
+    expect(afterClose.done).toBe(true);
+
+    await Promise.all(dbs.map((d) => d.close()));
+  });
+
   it('two independent shared databases do not cross-talk', async () => {
     const providerA = new MemoryStorageProvider();
     const providerB = new MemoryStorageProvider();

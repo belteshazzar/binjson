@@ -2018,6 +2018,63 @@ function resolveCurrentDate(update) {
   return result;
 }
 
+/**
+ * A live feed of change events from a Collection (Collection.watch()) or a
+ * SharedCollection (db-coordinator.js's Coordinator.watch()) -- both an
+ * EventEmitter-lite (.on('change', cb)) and an async iterator (for await),
+ * matching the real driver's ChangeStream dual API. `unsubscribe` (called
+ * once, on close()) removes this stream from whatever registry created it.
+ */
+class ChangeStream {
+  constructor(unsubscribe) {
+    this._listeners = new Set();
+    this._queue = [];
+    this._waiting = []; // pending next() resolvers, FIFO
+    this._closed = false;
+    this._unsubscribe = unsubscribe;
+  }
+
+  _emit(change) {
+    if (this._closed) return;
+    for (const cb of this._listeners) cb(change);
+    if (this._waiting.length) this._waiting.shift()({ value: change, done: false });
+    else this._queue.push(change);
+  }
+
+  on(event, cb) {
+    if (event !== 'change') throw new Error(`ChangeStream: unsupported event "${event}"`);
+    this._listeners.add(cb);
+    return this;
+  }
+
+  off(cb) {
+    this._listeners.delete(cb);
+    return this;
+  }
+
+  async next() {
+    if (this._queue.length) return { value: this._queue.shift(), done: false };
+    if (this._closed) return { value: undefined, done: true };
+    return new Promise((resolve) => this._waiting.push(resolve));
+  }
+
+  [Symbol.asyncIterator]() { return this; }
+
+  async return() {
+    this.close();
+    return { value: undefined, done: true };
+  }
+
+  close() {
+    if (this._closed) return;
+    this._closed = true;
+    const waiting = this._waiting;
+    this._waiting = [];
+    for (const resolve of waiting) resolve({ value: undefined, done: true });
+    if (this._unsubscribe) this._unsubscribe();
+  }
+}
+
 class Collection {
   constructor(name, tree, { catalog, provider, order }) {
     this.name = name;
@@ -2034,6 +2091,32 @@ class Collection {
     this._indexes = new Map();
     this._journal = null;    // sync access handle for the cross-file commit journal
     this._journalFd = -1;
+    this._watchers = new Set(); // open ChangeStreams (see watch())
+  }
+
+  /**
+   * A live feed of change events (insert/update/replace/delete) for this
+   * collection. Unlike the real driver, `pipeline` stages ($match, etc.)
+   * aren't supported yet -- filter inside your own `on('change', cb)`
+   * instead -- and there's no `updateDescription` (would need diffing
+   * before/after images; skipped as a documented scope limit). Costs
+   * nothing when nothing is watching: see _emitChange's fast path and each
+   * CRUD method's "only when _watchers.size" extra lookups.
+   */
+  watch(pipeline = [], options = {}) {
+    if (pipeline.length) {
+      throw new Error('Collection.watch: pipeline stages are not supported yet');
+    }
+    const stream = new ChangeStream(() => this._watchers.delete(stream));
+    this._watchers.add(stream);
+    return stream;
+  }
+
+  /** No-op fast path when nothing is watching (the common case). */
+  _emitChange(event) {
+    if (this._watchers.size === 0) return;
+    const change = { ns: { coll: this.name }, ...event };
+    for (const stream of this._watchers) stream._emit(change);
   }
 
   /** Close every already-opened index tree/rtree (not the primary tree or
@@ -2139,6 +2222,7 @@ class Collection {
   }
 
   async _close() {
+    for (const stream of [...this._watchers]) stream.close();
     await this._closeIndexes();
     if (this._journalFd >= 0) {
       unregisterHandle(requireModule(), this._journalFd);
@@ -2398,6 +2482,7 @@ class Collection {
     const bytes = encode({ ...doc, _id });
     const rc = withBytes(M, bytes, (p, n) => M._dcw_insert_one(this._collCtx, p, n));
     if (rc !== 0) throw codeError(rc, 'insertOne');
+    this._emitChange({ operationType: 'insert', documentKey: { _id }, fullDocument: { ...doc, _id } });
     return { acknowledged: true, insertedId: _id };
   }
 
@@ -2432,6 +2517,11 @@ class Collection {
         throw err;
       }
     }
+    for (let i = 0; i < results.length; i++) {
+      if (results[i] === 0) {
+        this._emitChange({ operationType: 'insert', documentKey: { _id: ids[i] }, fullDocument: { ...docs[i], _id: ids[i] } });
+      }
+    }
     return { acknowledged: true, insertedCount, insertedIds };
   }
 
@@ -2441,6 +2531,19 @@ class Collection {
     const found = withBytes(M, fbytes, (p, n) => M._dcw_find_one(this._outCtx, this._collCtx, p, n));
     if (found < 0) throw codeError(found, 'findOne');
     return found ? this._readOut(M) : null;
+  }
+
+  /**
+   * The _id a filter-based mutation (updateOne/deleteOne/etc.) is about to
+   * affect, resolved *before* the mutation runs (the filter may no longer
+   * match afterward) -- for building a watch() change event. Free when the
+   * filter already names `_id` directly; otherwise one extra findOne, only
+   * ever called when this collection actually has active watchers.
+   */
+  async _resolveDocumentKeyForWatch(filter) {
+    if (filter && filter._id !== undefined) return toObjectId(filter._id);
+    const doc = await this.findOne(filter);
+    return doc ? doc._id : null;
   }
 
   /**
@@ -2501,18 +2604,26 @@ class Collection {
 
   async deleteOne(filter = {}) {
     const M = requireModule();
+    const watching = this._watchers.size > 0;
+    const preId = watching ? await this._resolveDocumentKeyForWatch(filter) : null;
     const fbytes = encode(filter);
     const rc = withBytes(M, fbytes, (p, n) => M._dcw_delete_one(this._collCtx, p, n));
     if (rc < 0) throw codeError(rc, 'deleteOne');
+    if (watching && rc === 1 && preId) this._emitChange({ operationType: 'delete', documentKey: { _id: preId } });
     return { acknowledged: true, deletedCount: rc };
   }
 
   /** Delete every document matching `filter`. */
   async deleteMany(filter = {}) {
     const M = requireModule();
+    const watching = this._watchers.size > 0;
+    const preIds = watching ? (await this.find(filter, { projection: { _id: 1 } }).toArray()).map(d => d._id) : null;
     const fbytes = encode(filter);
     const n = withBytes(M, fbytes, (p, len) => M._dcw_delete_many(this._collCtx, p, len));
     if (n < 0) throw codeError(n, 'deleteMany');
+    if (watching) {
+      for (const _id of preIds) this._emitChange({ operationType: 'delete', documentKey: { _id } });
+    }
     return { acknowledged: true, deletedCount: n };
   }
 
@@ -2523,7 +2634,10 @@ class Collection {
     const fbytes = encode(filter);
     const found = withBytes(M, fbytes, (p, n) => M._dcw_find_one_and_delete(this._outCtx, this._collCtx, p, n));
     if (found < 0) throw codeError(found, 'findOneAndDelete');
-    return found ? this._readOut(M) : null;
+    if (!found) return null;
+    const doc = this._readOut(M);
+    this._emitChange({ operationType: 'delete', documentKey: { _id: doc._id } });
+    return doc;
   }
 
   /**
@@ -2584,6 +2698,8 @@ class Collection {
     if (replacement === null || typeof replacement !== 'object' || Array.isArray(replacement)) {
       throw new Error('replaceOne requires a replacement document object');
     }
+    const watching = this._watchers.size > 0;
+    const preId = watching ? await this._resolveDocumentKeyForWatch(filter) : null;
     const { rc, defaultId } = this._marshalTriple(filter, replacement, (M, fp, fn, rp, rn, dp) =>
       M._dcw_replace_one(this._collCtx, fp, fn, rp, rn, dp, upsert ? 1 : 0));
     if (rc < 0) throw codeError(rc, 'replaceOne');
@@ -2591,7 +2707,13 @@ class Collection {
     if (rc === 0) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null };
     if (rc === 2) {
       const upsertedId = replacement._id !== undefined ? toObjectId(replacement._id) : defaultId;
+      if (watching) {
+        this._emitChange({ operationType: 'insert', documentKey: { _id: upsertedId }, fullDocument: { ...replacement, _id: upsertedId } });
+      }
       return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId };
+    }
+    if (watching && preId) {
+      this._emitChange({ operationType: 'replace', documentKey: { _id: preId }, fullDocument: { ...replacement, _id: preId } });
     }
     return { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedId: null };
   }
@@ -2611,7 +2733,16 @@ class Collection {
     const { rc } = this._marshalTriple(filter, replacement, (M, fp, fn, rp, rn, dp) =>
       M._dcw_find_one_and_replace(this._outCtx, this._collCtx, fp, fn, rp, rn, dp, upsert ? 1 : 0, returnNew ? 1 : 0));
     if (rc < 0) throw codeError(rc, 'findOneAndReplace');
-    return rc ? this._readOut(requireModule()) : null;
+    if (!rc) return null;
+    const doc = this._readOut(requireModule());
+    // Documented simplification: always 'replace', not distinguishing an
+    // upsert-triggered insert (see docs/db-plan.md's change-streams entry).
+    this._emitChange({
+      operationType: 'replace',
+      documentKey: { _id: doc._id },
+      fullDocument: returnNew ? doc : { ...replacement, _id: doc._id }
+    });
+    return doc;
   }
 
   /**
@@ -2626,12 +2757,22 @@ class Collection {
       throw new Error('updateOne requires an update document object');
     }
     update = resolveCurrentDate(update);
+    const watching = this._watchers.size > 0;
+    const preId = watching ? await this._resolveDocumentKeyForWatch(filter) : null;
     const { rc, defaultId } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
       M._dcw_update_one(this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0));
     if (rc < 0) throw codeError(rc, 'updateOne');
 
     if (rc === 0) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null };
-    if (rc === 2) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: defaultId };
+    if (rc === 2) {
+      if (watching) {
+        this._emitChange({ operationType: 'insert', documentKey: { _id: defaultId }, fullDocument: await this.findOne({ _id: defaultId }) });
+      }
+      return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: defaultId };
+    }
+    if (watching && preId) {
+      this._emitChange({ operationType: 'update', documentKey: { _id: preId }, fullDocument: await this.findOne({ _id: preId }) });
+    }
     return { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedId: null };
   }
 
@@ -2650,7 +2791,15 @@ class Collection {
     const { rc } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
       M._dcw_find_one_and_update(this._outCtx, this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0, returnNew ? 1 : 0));
     if (rc < 0) throw codeError(rc, 'findOneAndUpdate');
-    return rc ? this._readOut(requireModule()) : null;
+    if (!rc) return null;
+    const doc = this._readOut(requireModule());
+    if (this._watchers.size > 0) {
+      // Documented simplification: always 'update', not distinguishing an
+      // upsert-triggered insert (see docs/db-plan.md's change-streams entry).
+      const fullDocument = returnNew ? doc : await this.findOne({ _id: doc._id });
+      this._emitChange({ operationType: 'update', documentKey: { _id: doc._id }, fullDocument });
+    }
+    return doc;
   }
 
   /**
@@ -2663,11 +2812,25 @@ class Collection {
       throw new Error('updateMany requires an update document object');
     }
     update = resolveCurrentDate(update);
+    const watching = this._watchers.size > 0;
+    const preIds = watching ? (await this.find(filter, { projection: { _id: 1 } }).toArray()).map(d => d._id) : null;
     const { rc, defaultId } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
       M._dcw_update_many(this._outCtx, this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0));
     if (rc !== 0) throw codeError(rc, 'updateMany');
 
     const result = this._readOut(requireModule());
+    if (watching) {
+      if (result.upserted) {
+        this._emitChange({ operationType: 'insert', documentKey: { _id: defaultId }, fullDocument: await this.findOne({ _id: defaultId }) });
+      } else {
+        // Documented cost note: with active watchers this is O(matched)
+        // extra round trips (one findOne per matched document) -- fine for
+        // a demo/observability feature, not a hot path.
+        for (const _id of preIds) {
+          this._emitChange({ operationType: 'update', documentKey: { _id }, fullDocument: await this.findOne({ _id }) });
+        }
+      }
+    }
     return {
       acknowledged: true,
       matchedCount: result.matchedCount,
@@ -2917,6 +3080,7 @@ export {
   applyDelta,
   Db,
   Collection,
+  ChangeStream,
   MemoryStorageProvider,
   OPFSStorageProvider,
   connect

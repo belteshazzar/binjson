@@ -18,8 +18,16 @@ function makeTab() {
   const worker = new Worker(new URL('./db-coordinator-harness.js', import.meta.url), { type: 'module' });
   let nextId = 1;
   const pending = new Map();
+  const changes = [];
+  const changeWaiters = []; // pending nextChange() resolvers, FIFO
   worker.addEventListener('message', (event) => {
-    const { id, ok, result, error } = event.data;
+    const { id, ok, result, error, change } = event.data;
+    if (change !== undefined) {
+      const decoded = decode(change);
+      if (changeWaiters.length) changeWaiters.shift()(decoded);
+      else changes.push(decoded);
+      return;
+    }
     const p = pending.get(id);
     if (!p) return;
     pending.delete(id);
@@ -36,8 +44,15 @@ function makeTab() {
       worker.postMessage({ id, cmd, argsPayload: encode(args === undefined ? null : args) });
     });
   }
+  /** Resolves with the next change event this tab's watch() receives
+   * (already-arrived ones queue up, same as ChangeStream.next()). */
+  function nextChange() {
+    if (changes.length) return Promise.resolve(changes.shift());
+    return new Promise((resolve) => changeWaiters.push(resolve));
+  }
   return {
     call,
+    nextChange,
     terminate: () => worker.terminate()
   };
 }
@@ -154,6 +169,25 @@ describe('db-coordinator: multi-tab OPFS sharing', () => {
     const names = (await survivors[1].call('collection', { collection: 'users', method: 'find', args: [{}, {}] }))
       .map((d) => d.name).sort();
     expect(names).toEqual(['Grace', 'Katherine']);
+  });
+
+  it('watch() delivers a change made in one tab to another tab watching the same collection', async () => {
+    const dir = dirName();
+    const t1 = tab(), t2 = tab();
+    await Promise.all([
+      t1.call('connect', { dbName: 'shared', dirName: dir }),
+      t2.call('connect', { dbName: 'shared', dirName: dir })
+    ]);
+
+    // Start watching before the write so there's no race against the
+    // change's own (async, BroadcastChannel-carried) rebroadcast.
+    await t2.call('watch', { collection: 'users' });
+    const { insertedId } = await t1.call('collection', { collection: 'users', method: 'insertOne', args: [{ name: 'Ada' }] });
+
+    const change = await t2.nextChange();
+    expect(change.operationType).toBe('insert');
+    expect(change.documentKey._id).toEqual(insertedId);
+    expect(change.fullDocument.name).toBe('Ada');
   });
 
   it('two independent dbNames on the same OPFS root do not cross-talk', async () => {
