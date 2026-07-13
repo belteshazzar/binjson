@@ -18,14 +18,18 @@ should stay one repo or split, and lays out a phased path to get there.
   (already largely in place) rather than splitting into 3 git repos. Revisit
   a real split only when a concrete forcing function shows up (see
   [Repo structure](#repo-structure-one-repo-or-three)).
-- **macOS/iOS: compile the C core natively, don't embed a JS engine.**
-  Decided (not just leaning): no JavaScriptCore/WASM embedding. The C code
-  already builds and runs as plain, portable C11 (`npm run test:c` proves
-  this every milestone), and the host I/O boundary (`c/bjio.h`) was
-  *already designed* for this — its own doc comment says "plain file
-  descriptors in a native build." This is far less new work than it
-  sounds, and it's the better runtime/binary-size outcome. See
-  [Use case 2](#use-case-2-macosios-app-embedding).
+- **macOS/iOS: embed the existing WASM build inside JavaScriptCore, not a
+  native C compile.** Decided (reversing an earlier draft of this
+  document, which chose the native path and even got as far as a working
+  prototype — see [Use case 2](#use-case-2-macosios-app-embedding) for
+  that history). JavaScriptCore is a full JavaScript engine, not just a
+  WASM VM, so it can run `src/binjson-wasm.js`/`src/db.js` *verbatim*
+  inside the app; the Swift side only needs to provide file I/O and call
+  into that unmodified JS API, rather than re-implementing the codec and
+  the `Db`/`Collection` API in Swift by hand. Benchmarking (below) also
+  showed the actual database operations already run at native speed under
+  WASM, so there's no performance reason to prefer native compilation
+  either. See [Use case 2](#use-case-2-macosios-app-embedding).
 - **Cloud service: don't chase MongoDB wire-protocol compatibility.**
   Implement the real wire protocol only if a concrete customer needs the
   existing `mongodb` driver to point at this unmodified — otherwise a thin
@@ -48,9 +52,10 @@ should stay one repo or split, and lays out a phased path to get there.
   vtable (`size`/`read`/`write`/`truncate`, synchronous, context-pointer
   based) is what every persistent structure goes through. `c/hostio.c`
   implements it *for WASM* (via `EM_JS` calls into a JS-side
-  `FileSystemSyncAccessHandle`) and its own comment already anticipates a
-  second, native implementation. This is the single most important existing
-  asset for use case 2.
+  `FileSystemSyncAccessHandle`). A native (POSIX) implementation was also
+  prototyped and confirmed working, then removed once use case 2 settled
+  on JavaScriptCore instead (see below) — recoverable from git history
+  (commit `aa92dbd`) if a native build is ever worth reviving.
 - **Storage is already provider-abstracted on the JS side too**:
   `MemoryStorageProvider`/`OPFSStorageProvider` implement a 2-method
   contract (`openFile`/`deleteFile`). A Node-native or object-storage-backed
@@ -126,87 +131,99 @@ toward all along.
 
 ## Use case 2: macOS/iOS app embedding
 
-### Decision: native C compile, no WASM, no JS engine
+### Decision: embed the existing WASM build inside JavaScriptCore
 
-Compile `c/db*.c`, `c/binjson.c`, `c/bplustree.c` etc. directly as a native
-static library/XCFramework (arm64 + x86_64), skip the `*_wasm.c` glue files
-entirely (they only exist to satisfy Emscripten's WASM-export ABI
-conventions — a native Swift bridge calls the underlying `dc_*`/`bj_*`
-functions directly with native pointers), and write a Swift package that
-wraps the C API. The one new C-side piece is a native `bj_io`
-implementation (`c/hostio.c`'s WASM version is ~40 lines of `EM_JS`; a
-POSIX `pread`/`pwrite`/`ftruncate`/`fstat`-backed native version is
-comparably small — and `bjio.h`'s own comment already names this as the
-intended second implementation).
+Bundle `lib/binjson.wasm` and the existing JS glue (`src/binjson-wasm.js`,
+`src/db.js`) unmodified, and run them inside a `JSContext` (JavaScriptCore
+ships on both macOS and iOS as a system framework — no App Store engine
+restriction, since it's Apple's own JS engine). The decisive point: a
+`JSContext` is a *full JavaScript engine*, not merely a WASM VM, so it can
+execute `src/binjson-wasm.js`/`src/db.js` exactly as-is — the same
+`Db`/`Collection` API, the same `encode`/`decode`, the same `ObjectId`/
+`Date` handling, with zero re-implementation. The only genuinely new code
+is:
+- A Swift-side `StorageProvider` bridge — real POSIX file I/O in the app's
+  sandboxed container, exposed into the `JSContext` so the *existing*
+  `OPFSStorageProvider`-shaped contract (`openFile`/`deleteFile`, a
+  `getSize`/`read`/`write`/`truncate`/`flush`/`close` handle) has something
+  to call on iOS/macOS instead of real OPFS.
+- A thin Swift-to-JS facade translating Swift calls into `JSContext`
+  method invocations and marshaling plain values (numbers/strings/booleans/
+  dates/byte arrays) across — no codec or database logic of its own.
 
-The alternative considered — bundling `lib/binjson.wasm` + the existing JS
-glue and running it inside a `JSContext` (JavaScriptCore ships on both
-macOS and iOS as a system framework, no App-Store engine restriction) —
-would reuse the JS `Collection` API as-is and needs less new code (just a
-Swift-side `StorageProvider` bridge and a thin Swift-to-JS facade). Ruled
-out in favor of the native path because:
-- The C core is *already proven* to build natively (every milestone's own
-  verification step does this) — there's no unknown here, just an unwritten
-  `bj_io` backend.
-- No JS engine startup/runtime overhead, no WASM interpretation/JIT tax —
-  meaningfully better for a mobile-embedded database where binary size and
-  battery/CPU headroom both matter.
-- Swift's C interop (via a Swift Package Manager C target) is a mature,
-  well-trodden path; JSContext-based WASM embedding is comparatively exotic
-  and has less community precedent to lean on if something goes wrong.
-- It keeps the "C owns all the logic" rule (already the project's own
-  stated architecture principle) literally true for a third consumer, not
-  just figuratively — the Swift layer is exactly as thin a bridge as
-  `binjson-wasm.js` is today, just calling C directly instead of through a
-  WASM boundary.
+This reverses an earlier draft of this document, which chose compiling the
+C core natively instead (skipping WASM/JS entirely, via a Swift↔C bridge).
+That path was fully prototyped and confirmed working — a native `bj_io`
+(POSIX `pread`/`pwrite`/`ftruncate`/`fstat`) and a from-scratch native
+rewrite of one of the CLI tools, proven byte-for-byte compatible with its
+JS counterpart — before being removed once this decision settled on
+JavaScriptCore instead; see commit `aa92dbd` (and the native CLI rewrite
+in the commit immediately after it) if that work is ever worth reviving.
+Reversed anyway, for two reasons:
+- **Running WASM inside a real JS engine means the entire existing JS
+  layer runs unmodified.** The native path would have required someone to
+  hand-port `binjson-wasm.js`'s codec and `Db`/`Collection` API to Swift —
+  real, substantial, ongoing-maintenance-burden new code, duplicating logic
+  that already exists and is already tested. Embedding in JavaScriptCore
+  needs none of that: the Swift layer is only a host (file I/O + a call
+  bridge), the same shape `binjson-wasm.js` itself already is relative to
+  the WASM module.
+- **Benchmarked, not assumed, that WASM isn't the slow path here** (see
+  below) — the actual database operations (inserts, searches, the whole
+  `Collection` API) already run at native speed under WASM. There's no
+  performance case for native compilation, only a maintenance case against
+  it: a second toolchain (a C compiler/linker per target platform, on top
+  of Node/Emscripten), and a second host-I/O implementation that can drift
+  from the WASM one.
 
-The honest cost: someone has to write the Swift-facing binjson encoder/
-decoder and `Db`/`Collection` API wrapper (the Swift counterpart to
-`binjson-wasm.js`) from scratch — real, non-trivial new code. That cost
-exists either way (the JSC path needs an equivalent Swift-JS bridge), so
-it isn't a reason to prefer the alternative — it's just the acknowledged
-price of this use case, independent of which path is chosen.
+### Native vs. WASM performance (measured, not assumed)
+
+A throwaway benchmark (native compiled with `-O3` to match the WASM
+build's own optimization level, vs. the WASM build via Node — same
+operations, same counts, in-memory storage on both sides, no disk I/O)
+gave:
+
+| Benchmark | Native | WASM (Node) | Ratio |
+|---|---|---|---|
+| B+Tree insert (50k keys, order 32) | ~72k ops/sec | ~72-89k ops/sec | at parity |
+| B+Tree search (50k keys) | ~443k ops/sec | ~423-461k ops/sec | at parity |
+| Encode a 4-field document (20k docs) | ~4.7-6.5M ops/sec | ~125-171k ops/sec | native ~30-50x faster |
+
+Tree operations run at native speed either way: each JS→WASM call does
+substantial work internally (tree traversal, node splits, all inside
+compiled code), so the one-time cost of crossing the boundary is a
+rounding error against the work done per call. The encode gap is
+architectural: `encode()` in `src/binjson-wasm.js` calls a *separate*
+WASM-exported function per field (`_bjw_put_int`, `_bjw_put_key`,
+`_bjw_put_string`, ...), so a 4-field document costs ~10 boundary
+crossings, each doing only a few bytes of real work — the case where
+call/marshaling overhead dominates trivial per-call work. Since the
+`Collection` API (what every actual use case here exercises) looks like
+the first two rows, not the third, embedding the WASM build costs nothing
+in practice.
 
 ### Other requirements
 - **Storage location**: the app's own sandboxed container (`Application
-  Support`/`Documents`), not OPFS — this is exactly what the native `bj_io`
-  (Option B) or a Swift `StorageProvider` (Option A) replaces.
+  Support`/`Documents`), not OPFS — exactly what the Swift `StorageProvider`
+  bridge replaces.
 - **No `navigator.locks`/`BroadcastChannel` equivalent needed for a single
   app process** — `src/db-coordinator.js`'s multi-tab problem doesn't exist
   inside one app's process. (It would resurface if a macOS app and a
   today-hypothetical Mac Catalyst/sibling process needed to share one
   database file — cross that bridge only if it comes up.)
-- **App extension / background-process concurrency**: if the app has
-  extensions or background tasks that might open the same database file,
-  the exclusive-file-handle model that motivated `db-coordinator.js` in the
-  browser applies here too, via native file locks (`flock`/`O_EXLOCK`)
-  instead of Web Locks.
-- **Distribution**: Swift Package Manager package wrapping the C library —
-  standard, low-risk path for shipping both a compiled static library and
-  a Swift API surface together.
+- **Distribution**: a Swift package bundling the WASM binary, the JS glue,
+  and the small Swift facade — standard Swift Package Manager resource
+  bundling, no XCFramework/native-library build needed.
 
 ### Steps
-1. ✅ **Done.** Native `bj_io` implementation: `c/posixio.h`/`c/posixio.c`
-   (POSIX `pread`/`pwrite`/`ftruncate`/`fstat`, mirroring `hostio.c`'s WASM
-   shape exactly), plus `c/build-native.sh` (`npm run build:native`) —
-   compiles every core source `build-wasm.sh` does, minus the `*_wasm.c`
-   glue, into `lib-native/libbinjson.a` via plain `cc`/`ar`, no Emscripten.
-   Verified two ways (`npm run test:native`, `c/test_posixio.c`): raw
-   size/read/write/truncate correctness against a real temp file, and a
-   full `bpt_create`/`bpt_add`/close/reopen/`bpt_search` round trip through
-   `bplustree.c` — proving `bjio_posix` is a genuine drop-in for
-   `bjio_host`, not just byte-correct in isolation. (One bug caught along
-   the way: the test's own first draft passed raw C strings as B+ tree
-   values; `bpt_add`'s value must be a pre-encoded binjson value since a
-   node's serialized form relies on each value being self-describing —
-   confirmed this wasn't a `posixio.c` bug by reproducing the identical
-   failure with `fuzz.c`'s already-proven in-memory `bj_io` first.)
-2. Build the C sources as an XCFramework (arm64 macOS + arm64/x86_64 iOS
-   simulator + device).
-3. Write the Swift-facing binjson codec (mirrors `src/binjson.js`'s
-   `encode`/`decode`) and a `Db`/`Collection` Swift API (mirrors
-   `src/binjson-wasm.js`'s `Db`/`Collection`), calling the C functions
-   directly.
+1. Spike: instantiate `lib/binjson.wasm` inside a bare `JSContext` and call
+   one exported function, confirming JavaScriptCore's WASM support is
+   solid on current OS versions.
+2. Write a Swift `StorageProvider` bridge (POSIX file I/O in the app's
+   sandbox container, exposed into the `JSContext`, matching the existing
+   `openFile`/`deleteFile` + handle contract `OPFSStorageProvider` uses).
+3. Write a thin Swift facade calling the JS `Db`/`Collection` API through
+   the `JSContext` (Swift method → JS call → JSON-ish marshaling).
 4. Package as a Swift Package Manager library; validate on a throwaway
    macOS app target first, then iOS.
 5. Only then decide whether iOS App Store review needs anything special
@@ -302,12 +319,11 @@ than it returns.
   bumps, `npm link`/local-path juggling during development, and multi-repo
   CI — pure friction for exactly the kind of fast, cross-layer iteration
   this project has been doing.
-- **The API boundary isn't stable yet.** The macOS/iOS work above will
-  likely want a different C-facing entry surface than `*_wasm.c`'s
-  WASM-ABI-shaped exports (native pointers instead of malloc'd heap
-  offsets, for instance). Locking in a "public, versioned, external" core
-  repo API before that's been prototyped risks freezing the wrong
-  boundary.
+- **Nothing forces a C-level split yet.** With use case 2 now planned as
+  WASM embedded in JavaScriptCore rather than a native compile, macOS/iOS
+  consumes the *same* `*_wasm.c`-exported WASM module and the *same* JS
+  layer web use does — there's no second, divergent C-facing entry surface
+  motivating a separate core package/repo boundary right now.
 - **No external forcing function exists yet** — no outside contributors,
   no second team depending on just the codec, no evidence a shared release
   cadence is actually painful in practice.
@@ -322,13 +338,13 @@ structures) and a `@belteshazzar/binjson-db` (document database) as
 separately published packages, still from this one repo — this alone
 captures most of the "install just what you need" benefit for use case 1
 without any multi-repo cost. Only actually split into separate git repos
-if one of these becomes true: (a) the native macOS/iOS work matures into
-its own repo naturally because its toolchain (Xcode, SPM, XCFramework
-builds) has nothing in common with the JS/Vitest/Playwright toolchain and
-sharing a repo is actively getting in the way; (b) the cloud service grows
-its own deploy/ops surface (Dockerfiles, infra-as-code, secrets) that
-doesn't belong next to a client library's source; (c) an external
-community forms around just the binjson codec.
+if one of these becomes true: (a) the macOS/iOS Swift package matures into
+its own repo naturally because its toolchain (Xcode, SPM) has nothing in
+common with the JS/Vitest/Playwright toolchain and sharing a repo is
+actively getting in the way; (b) the cloud service grows its own deploy/ops
+surface (Dockerfiles, infra-as-code, secrets) that doesn't belong next to a
+client library's source; (c) an external community forms around just the
+binjson codec.
 
 ## Open questions worth deciding explicitly
 

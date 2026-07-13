@@ -142,5 +142,4 @@ test/__screenshots__
 
 # binjson build outputs
 lib/
-lib-native/
 site/
