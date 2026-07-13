@@ -45,7 +45,9 @@ const ERR = {
   [-6]: 'Pointer offset out of valid range',
   [-7]: 'Maximum nesting depth exceeded',
   [-8]: 'Structural invariant violated',
-  [-9]: 'Argument out of range'
+  [-9]: 'Argument out of range',
+  [-10]: 'Duplicate _id',
+  [-11]: 'replaceOne cannot change the _id of an existing document'
 };
 
 const textEncoder = new TextEncoder();
@@ -1847,6 +1849,432 @@ function applyDelta(source, delta) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Db / Collection — a MongoDB-driver-shaped document database.
+//
+// A collection is a bpt keyed by the raw 12-byte ObjectId (see db.h), with
+// insert/find/delete/replace/count and filter matching implemented in C
+// (db.c/db_wasm.c) — this layer only marshals bytes across the WASM bridge,
+// the same way BPlusTree/RTree/TextIndex above do. A database is a root
+// catalog tree (collection name -> backing file name) plus a storage
+// provider that turns file names into sync-handle-shaped objects; that
+// bookkeeping is plain B+ tree key lookups, already fully served by
+// BPlusTree, so it stays here rather than growing new C surface.
+//
+// _id defaulting stays in JS for the same reason ts_ms does for textlog: it
+// needs a clock and randomness, neither of which WASM has a portable source
+// for. replaceOne's upsert case can't know ahead of the C-side match
+// whether a fresh id will actually be needed, so JS always generates one and
+// passes it as `default_id`; C only consults it when it decides to upsert.
+// ---------------------------------------------------------------------------
+
+const DB_CATALOG_FILE = '__catalog__.bj';
+const DB_DEFAULT_ORDER = 32;
+
+function toObjectId(id) {
+  if (id instanceof ObjectId) return id;
+  if (typeof id === 'string') return new ObjectId(id);
+  throw new Error(`Invalid _id: ${id}`);
+}
+
+function checkCollectionName(name) {
+  if (typeof name !== 'string' || name.length === 0 || name.includes('/') || name.includes('\0')) {
+    throw new Error(`Invalid collection name: ${JSON.stringify(name)}`);
+  }
+}
+
+function collectionFileName(name) {
+  return `coll-${name}.bj`;
+}
+
+function indexFileName(collectionName, indexName) {
+  return `idx-${collectionName}-${indexName}.bj`;
+}
+
+/** Default index name mirroring the real driver's convention: "team_1",
+ * "team_1_age_1" for a compound index. Only ascending (1) fields are
+ * supported so far — descending order only changes scan direction, which a
+ * caller can already get by reversing results, so it's deferred rather than
+ * plumbed through the composite-key encoding (keyenc.h) for no behavioral
+ * gain yet. */
+function checkIndexKeySpec(keys) {
+  const fields = Object.keys(keys);
+  if (fields.length === 0) throw new Error('createIndex requires at least one field');
+  for (const f of fields) {
+    if (keys[f] !== 1) {
+      throw new Error(`createIndex: only ascending (1) fields are supported so far (got ${f}: ${keys[f]})`);
+    }
+  }
+  return fields;
+}
+
+/**
+ * In-memory named-file storage: handles persist for the process lifetime
+ * (MemoryHandle.close() is a no-op, so data survives collection/Db close).
+ * Intended for tests and embeddings that don't need durability.
+ */
+class MemoryStorageProvider {
+  constructor() {
+    this._files = new Map(); // name -> MemoryHandle
+  }
+
+  async openFile(name, { create = false } = {}) {
+    let handle = this._files.get(name);
+    if (!handle) {
+      if (!create) throw new Error(`File not found: ${name}`);
+      handle = new MemoryHandle();
+      this._files.set(name, handle);
+    }
+    return handle;
+  }
+
+  async deleteFile(name) {
+    this._files.delete(name);
+  }
+}
+
+/**
+ * OPFS-backed named-file storage, rooted at a directory handle (defaults to
+ * the OPFS root, resolved lazily so construction works outside a worker).
+ */
+class OPFSStorageProvider {
+  constructor(dirHandle) {
+    this._dirHandle = dirHandle || null;
+  }
+
+  async _dir() {
+    if (!this._dirHandle) this._dirHandle = await navigator.storage.getDirectory();
+    return this._dirHandle;
+  }
+
+  async openFile(name, { create = false } = {}) {
+    const dir = await this._dir();
+    const fileHandle = await getFileHandle(dir, name, { create });
+    return fileHandle.createSyncAccessHandle();
+  }
+
+  async deleteFile(name) {
+    await deleteFile(await this._dir(), name);
+  }
+}
+
+class Collection {
+  constructor(name, tree, { catalog, provider, order }) {
+    this.name = name;
+    this._tree = tree;       // BPlusTree, opened by Db.collection()
+    this._catalog = catalog; // shared Db catalog tree, for this collection's index list
+    this._provider = provider;
+    this._order = order;
+    this._outCtx = 0;        // per-collection query-output slot in the WASM heap
+    this._collCtx = 0;       // dc_collection* coordinating the primary tree + indexes
+    this._indexes = new Map(); // indexName -> { fields, tree, file }
+  }
+
+  async _open() {
+    await this._tree.open();
+    const M = requireModule();
+    this._outCtx = M._dcw_out_new();
+    if (!this._outCtx) throw new Error('Failed to allocate collection output slot');
+    this._collCtx = M._dcw_collection_open(this._tree.ctx);
+    if (!this._collCtx) throw new Error('Failed to allocate collection handle');
+
+    const entry = this._catalog.search(this.name);
+    for (const def of entry.indexes || []) {
+      const handle = await this._provider.openFile(def.file, { create: false });
+      const tree = new BPlusTree(handle, this._order);
+      await tree.open();
+      const n = allocStr(M, def.name);
+      const fieldsBytes = encode(def.fields);
+      let rc;
+      try {
+        rc = withBytes(M, fieldsBytes, (fp, flen) =>
+          M._dcw_collection_attach_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen));
+      } finally {
+        n.free();
+      }
+      if (rc !== 0) throw codeError(rc, 'attachIndex');
+      this._indexes.set(def.name, { fields: def.fields, tree, file: def.file });
+    }
+  }
+
+  async _close() {
+    for (const { tree } of this._indexes.values()) await tree.close();
+    this._indexes.clear();
+    if (this._collCtx) {
+      requireModule()._dcw_collection_free(this._collCtx);
+      this._collCtx = 0;
+    }
+    if (this._outCtx) {
+      requireModule()._dcw_out_free(this._outCtx);
+      this._outCtx = 0;
+    }
+    await this._tree.close();
+  }
+
+  _readOut(M) {
+    const ptr = M._dcw_out_ptr(this._outCtx);
+    const len = M._dcw_out_len(this._outCtx);
+    if (len < 0) throw codeError(len, 'find');
+    if (len === 0) return undefined;
+    return decode(M.HEAPU8.slice(ptr, ptr + len));
+  }
+
+  _persistIndexes() {
+    const entry = this._catalog.search(this.name);
+    entry.indexes = [...this._indexes.entries()].map(([name, { fields, file }]) => ({ name, fields, file }));
+    this._catalog.add(this.name, entry);
+  }
+
+  /**
+   * Create a secondary index, e.g. createIndex({ team: 1 }) or a compound
+   * createIndex({ team: 1, age: 1 }). Backfills against any existing
+   * documents (all-or-nothing: fails if a document lacks one of the fields
+   * or holds a non-number/string value for one — see keyenc.h). Returns the
+   * index name (options.name, or the driver's default "field_1[_field2_1...]").
+   */
+  async createIndex(keys, options = {}) {
+    if (options.unique) throw new Error('createIndex: unique indexes are not yet supported');
+    const fields = checkIndexKeySpec(keys);
+    const name = options.name || fields.map(f => `${f}_1`).join('_');
+    if (this._indexes.has(name)) throw new Error(`Index already exists: ${name}`);
+
+    const fileName = indexFileName(this.name, name);
+    await this._provider.deleteFile(fileName); // clean slate in case a prior attempt was aborted
+    const tree = new BPlusTree(await this._provider.openFile(fileName, { create: true }), this._order);
+    await tree.open();
+
+    const M = requireModule();
+    const n = allocStr(M, name);
+    const fieldsBytes = encode(fields);
+    let rc;
+    try {
+      rc = withBytes(M, fieldsBytes, (fp, flen) =>
+        M._dcw_collection_add_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen));
+    } finally {
+      n.free();
+    }
+
+    if (rc !== 0) {
+      await tree.close();
+      await this._provider.deleteFile(fileName);
+      throw codeError(rc, 'createIndex');
+    }
+
+    this._indexes.set(name, { fields, tree, file: fileName });
+    this._persistIndexes();
+    return name;
+  }
+
+  async dropIndex(name) {
+    const entry = this._indexes.get(name);
+    if (!entry) throw new Error(`Index not found: ${name}`);
+    const M = requireModule();
+    const n = allocStr(M, name);
+    let rc;
+    try {
+      rc = M._dcw_collection_remove_index(this._collCtx, n.ptr, n.len);
+    } finally {
+      n.free();
+    }
+    if (rc !== 0) throw codeError(rc, 'dropIndex');
+    await entry.tree.close();
+    await this._provider.deleteFile(entry.file);
+    this._indexes.delete(name);
+    this._persistIndexes();
+  }
+
+  async listIndexes() {
+    return [...this._indexes.entries()].map(([name, { fields }]) => ({
+      name,
+      key: Object.fromEntries(fields.map(f => [f, 1]))
+    }));
+  }
+
+  /**
+   * Every document whose indexed fields equal `values` (in the index's
+   * field order), via an O(log n + k) index scan. A low-level primitive —
+   * find()/findOne() don't consult indexes yet (that's the query planner,
+   * a later milestone); this is what it will dispatch equality lookups to.
+   */
+  async findByIndex(name, values) {
+    if (!this._indexes.has(name)) throw new Error(`Index not found: ${name}`);
+    const M = requireModule();
+    const n = allocStr(M, name);
+    const valuesBytes = encode(values);
+    let rc;
+    try {
+      rc = withBytes(M, valuesBytes, (vp, vlen) =>
+        M._dcw_find_by_index(this._outCtx, this._collCtx, n.ptr, n.len, vp, vlen));
+    } finally {
+      n.free();
+    }
+    if (rc !== 0) throw codeError(rc, 'findByIndex');
+    return this._readOut(M) ?? [];
+  }
+
+  async insertOne(doc) {
+    if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+      throw new Error('insertOne requires a document object');
+    }
+    const M = requireModule();
+    const _id = doc._id !== undefined ? toObjectId(doc._id) : new ObjectId();
+    const bytes = encode({ ...doc, _id });
+    const rc = withBytes(M, bytes, (p, n) => M._dcw_insert_one(this._collCtx, p, n));
+    if (rc !== 0) throw codeError(rc, 'insertOne');
+    return { acknowledged: true, insertedId: _id };
+  }
+
+  async findOne(filter = {}) {
+    const M = requireModule();
+    const fbytes = encode(filter);
+    const found = withBytes(M, fbytes, (p, n) => M._dcw_find_one(this._outCtx, this._collCtx, p, n));
+    if (found < 0) throw codeError(found, 'findOne');
+    return found ? this._readOut(M) : null;
+  }
+
+  /** Mirrors the driver's find(): returns a cursor, not a promise. */
+  find(filter = {}) {
+    const collection = this;
+    return {
+      async toArray() {
+        const M = requireModule();
+        const fbytes = encode(filter);
+        const rc = withBytes(M, fbytes, (p, n) => M._dcw_find(collection._outCtx, collection._collCtx, p, n));
+        if (rc !== 0) throw codeError(rc, 'find');
+        return collection._readOut(M) ?? [];
+      },
+      async *[Symbol.asyncIterator]() {
+        for (const doc of await this.toArray()) yield doc;
+      }
+    };
+  }
+
+  async deleteOne(filter = {}) {
+    const M = requireModule();
+    const fbytes = encode(filter);
+    const rc = withBytes(M, fbytes, (p, n) => M._dcw_delete_one(this._collCtx, p, n));
+    if (rc < 0) throw codeError(rc, 'deleteOne');
+    return { acknowledged: true, deletedCount: rc };
+  }
+
+  async replaceOne(filter, replacement, { upsert = false } = {}) {
+    if (replacement === null || typeof replacement !== 'object' || Array.isArray(replacement)) {
+      throw new Error('replaceOne requires a replacement document object');
+    }
+    const M = requireModule();
+    const fBytes = encode(filter);
+    const rBytes = encode(replacement);
+    const defaultId = new ObjectId();
+    const idBytes = defaultId.toBytes();
+
+    const fp = fBytes.length ? M._malloc(fBytes.length) : 0;
+    const rp = rBytes.length ? M._malloc(rBytes.length) : 0;
+    const dp = M._malloc(12);
+    if (fBytes.length) M.HEAPU8.set(fBytes, fp);
+    if (rBytes.length) M.HEAPU8.set(rBytes, rp);
+    M.HEAPU8.set(idBytes, dp);
+
+    let rc;
+    try {
+      rc = M._dcw_replace_one(this._collCtx, fp, fBytes.length, rp, rBytes.length, dp, upsert ? 1 : 0);
+    } finally {
+      if (fp) M._free(fp);
+      if (rp) M._free(rp);
+      M._free(dp);
+    }
+    if (rc < 0) throw codeError(rc, 'replaceOne');
+
+    if (rc === 0) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null };
+    if (rc === 2) {
+      const upsertedId = replacement._id !== undefined ? toObjectId(replacement._id) : defaultId;
+      return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId };
+    }
+    return { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedId: null };
+  }
+
+  async countDocuments(filter = {}) {
+    const M = requireModule();
+    const fbytes = encode(filter);
+    const n = withBytes(M, fbytes, (p, len) => M._dcw_count(this._collCtx, p, len));
+    if (n < 0) throw codeError(n, 'countDocuments');
+    return n;
+  }
+}
+
+class Db {
+  constructor(provider, { order = DB_DEFAULT_ORDER } = {}) {
+    this._provider = provider;
+    this._order = order;
+    this._catalog = null;
+    this._collections = new Map();
+    this.isOpen = false;
+  }
+
+  async open() {
+    if (this.isOpen) throw new Error('Db is already open');
+    const handle = await this._provider.openFile(DB_CATALOG_FILE, { create: true });
+    this._catalog = new BPlusTree(handle, this._order);
+    await this._catalog.open();
+    this.isOpen = true;
+  }
+
+  async close() {
+    if (!this.isOpen) return;
+    for (const collection of this._collections.values()) await collection._close();
+    this._collections.clear();
+    await this._catalog.close();
+    this._catalog = null;
+    this.isOpen = false;
+  }
+
+  async collection(name) {
+    if (!this.isOpen) throw new Error('Db is not open');
+    checkCollectionName(name);
+    const cached = this._collections.get(name);
+    if (cached) return cached;
+
+    let entry = this._catalog.search(name);
+    if (!entry) {
+      entry = { file: collectionFileName(name) };
+      this._catalog.add(name, entry);
+    }
+    const handle = await this._provider.openFile(entry.file, { create: true });
+    const tree = new BPlusTree(handle, this._order);
+    const collection = new Collection(name, tree, {
+      catalog: this._catalog,
+      provider: this._provider,
+      order: this._order
+    });
+    await collection._open();
+    this._collections.set(name, collection);
+    return collection;
+  }
+
+  async listCollections() {
+    return this._catalog.toArray().map(({ key }) => key);
+  }
+
+  async dropCollection(name) {
+    const entry = this._catalog.search(name);
+    if (!entry) return false;
+    const cached = this._collections.get(name);
+    if (cached) {
+      await cached._close();
+      this._collections.delete(name);
+    }
+    this._catalog.delete(name);
+    for (const def of entry.indexes || []) await this._provider.deleteFile(def.file);
+    await this._provider.deleteFile(entry.file);
+    return true;
+  }
+}
+
+async function connect(provider, options) {
+  const db = new Db(provider, options);
+  await db.open();
+  return db;
+}
+
 export {
   ready,
   isReady,
@@ -1876,5 +2304,10 @@ export {
   unifiedDiff,
   applyPatch,
   createDelta,
-  applyDelta
+  applyDelta,
+  Db,
+  Collection,
+  MemoryStorageProvider,
+  OPFSStorageProvider,
+  connect
 };

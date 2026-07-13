@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/binjson.js",
-    "./wasm": "./src/binjson-wasm.js"
+    "./wasm": "./src/binjson-wasm.js",
+    "./db": "./src/db.js"
   },
   "bin": {
     "binjson": "bin/binjson.js",

@@ -82,7 +82,13 @@ ALL_EXPORTS='_malloc,_free,'\
 '_stemmer_stem,'\
 `# textindex`\
 '_tixw_recover,_tixw_add,_tixw_remove,_tixw_clear,_tixw_query,_tixw_query_all,_tixw_term_count,'\
-'_tixw_out_new,_tixw_out_free,_tixw_out_ptr,_tixw_out_len'
+'_tixw_out_new,_tixw_out_free,_tixw_out_ptr,_tixw_out_len,'\
+`# db (document collections, on top of bplustree)`\
+'_dcw_collection_open,_dcw_collection_free,'\
+'_dcw_collection_attach_index,_dcw_collection_add_index,_dcw_collection_remove_index,'\
+'_dcw_find_by_index,'\
+'_dcw_insert_one,_dcw_find_one,_dcw_find,_dcw_delete_one,_dcw_replace_one,_dcw_count,'\
+'_dcw_out_new,_dcw_out_free,_dcw_out_ptr,_dcw_out_len'
 
 # Every C source, each listed once. c/test_binjson.c is a native test harness
 # with its own main() and is deliberately excluded.
@@ -93,6 +99,7 @@ ALL_SOURCES=(
   c/geo.c c/rtree.c c/rtree_wasm.c
   c/diff.c c/textlog.c c/textlog_wasm.c
   c/stemmer.c c/textindex.c c/textindex_wasm.c
+  c/keyenc.c c/db.c c/db_wasm.c
 )
 
 build_module binjson createBinjsonModule "$ALL_EXPORTS" "${ALL_SOURCES[@]}"
