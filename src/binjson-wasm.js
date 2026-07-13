@@ -1976,6 +1976,48 @@ class OPFSStorageProvider {
   }
 }
 
+/**
+ * Resolves $currentDate into $set before an update document ever crosses
+ * the WASM bridge -- only the JS host has a clock (the same reasoning that
+ * already puts _id generation in JS, not C; see c/db_update.h's top
+ * comment). Returns `update` unchanged if it has no $currentDate; never
+ * mutates the caller's object. Each targeted field must be `true` or
+ * `{ $type: 'date' }` (no timestamp wire type exists) and must not already
+ * be targeted by another top-level operator.
+ */
+function resolveCurrentDate(update) {
+  if (!update || typeof update !== 'object' || !('$currentDate' in update)) return update;
+  const spec = update.$currentDate;
+  if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error('$currentDate requires an object mapping field names to true or {$type: "date"}');
+  }
+
+  const targetedElsewhere = new Set();
+  for (const [key, val] of Object.entries(update)) {
+    if (key === '$currentDate' || key[0] !== '$') continue;
+    if (val && typeof val === 'object') {
+      for (const f of Object.keys(val)) targetedElsewhere.add(f);
+    }
+  }
+
+  const result = { ...update };
+  delete result.$currentDate;
+  const set = { ...(update.$set || {}) };
+  for (const [field, fieldSpec] of Object.entries(spec)) {
+    const isPlainTrue = fieldSpec === true;
+    const isDateType = fieldSpec !== null && typeof fieldSpec === 'object' && fieldSpec.$type === 'date';
+    if (!isPlainTrue && !isDateType) {
+      throw new Error(`$currentDate: field "${field}" must be true or {$type: "date"} (got ${JSON.stringify(fieldSpec)})`);
+    }
+    if (targetedElsewhere.has(field) || Object.prototype.hasOwnProperty.call(set, field)) {
+      throw new Error(`$currentDate: field "${field}" is already targeted by another operator`);
+    }
+    set[field] = new Date();
+  }
+  result.$set = set;
+  return result;
+}
+
 class Collection {
   constructor(name, tree, { catalog, provider, order }) {
     this.name = name;
@@ -2573,15 +2615,17 @@ class Collection {
   }
 
   /**
-   * Apply update operators ($set/$unset/$inc/$push/$pull — see
-   * c/db_update.h for the exact rules) to the first document matching
-   * `filter`. `update`'s top level must be entirely $-prefixed operators;
-   * for a full replacement document use replaceOne instead.
+   * Apply update operators (see c/db_update.h for the exact rules;
+   * $currentDate is resolved here into $set before crossing the WASM
+   * bridge) to the first document matching `filter`. `update`'s top level
+   * must be entirely $-prefixed operators; for a full replacement document
+   * use replaceOne instead.
    */
   async updateOne(filter, update, { upsert = false } = {}) {
     if (update === null || typeof update !== 'object' || Array.isArray(update)) {
       throw new Error('updateOne requires an update document object');
     }
+    update = resolveCurrentDate(update);
     const { rc, defaultId } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
       M._dcw_update_one(this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0));
     if (rc < 0) throw codeError(rc, 'updateOne');
@@ -2601,6 +2645,7 @@ class Collection {
     if (update === null || typeof update !== 'object' || Array.isArray(update)) {
       throw new Error('findOneAndUpdate requires an update document object');
     }
+    update = resolveCurrentDate(update);
     const returnNew = returnDocument === 'after';
     const { rc } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
       M._dcw_find_one_and_update(this._outCtx, this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0, returnNew ? 1 : 0));
@@ -2617,6 +2662,7 @@ class Collection {
     if (update === null || typeof update !== 'object' || Array.isArray(update)) {
       throw new Error('updateMany requires an update document object');
     }
+    update = resolveCurrentDate(update);
     const { rc, defaultId } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
       M._dcw_update_many(this._outCtx, this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0));
     if (rc !== 0) throw codeError(rc, 'updateMany');

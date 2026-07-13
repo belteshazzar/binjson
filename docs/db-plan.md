@@ -586,26 +586,95 @@ Deferred further, not silently dropped.
   documents; index options survive close/reopen) plus 1 new query-engine
   test proving the `Date` `value_cmp` fix independently of TTL.
 
-### Milestone 10 — Update operator completeness — not started
+### Milestone 10 — Update operator completeness — ✅ COMPLETE
 
-`db_update.h` implements `$set`/`$unset`/`$inc`/`$push`/`$pull` only, all
-top-level-field-only. Gaps, roughly in order of how often real code uses
-them: `$addToSet` (like `$push` but only if absent — needs an equality
-scan of the array, same byte-equality primitive `$pull` already uses),
-`$min`/`$max`/`$mul`/`$rename`/`$currentDate` (each a small, self-contained
-addition alongside `$inc` in `db_update.c`), `$setOnInsert` (only applied
-on the upsert-insert path — `build_upsert_seed`/`upd_apply`'s callers in
-`dc_update_one`/`dc_update_many` already distinguish insert-vs-match, so
-this is mostly plumbing), `$pop`/`$pullAll`/`$bit` (smaller, less common).
-**Dotted-path targets** (`{$set: {"a.b": 1}}`, rejected today) and
-**positional array operators** (`$`, `$[]`, `$[<identifier>]` — target one
-array element) are a materially bigger chunk (auto-vivifying intermediate
-objects, array-element addressing) and worth splitting into their own
-follow-up milestone rather than bundling with the simpler operators above.
-`$push`'s `$each`/`$slice`/`$sort`/`$position` modifiers and `$pull`'s
-query-operator-condition support (`{$pull: {scores: {$lt: 5}}}`, vs.
-today's byte-equality-only) reuse `db_query.h`'s matcher for the condition
-case, similar in shape to milestone 3's planner reuse.
+`db_update.c` gained 9 new operators plus richer forms of two existing
+ones, all still top-level-field-only (dotted-path targets and positional
+array operators remain out of scope, left for a dedicated follow-up
+milestone per the original plan):
+
+- **`$addToSet`** — like `$push` but only appends if the value isn't
+  already byte-equal to an existing element; supports a `{$each: [...]}`
+  batch (each candidate deduped against both existing elements and ones
+  already added earlier in the same batch).
+- **`$min`/`$max`** — compare the field's current value against the
+  operand using the same number/string/Date ordering `db_query.h`'s
+  `$gt`/`$lt` already implement, now exposed as `qry_value_cmp` (renamed
+  from the file-local `value_cmp`, 3 call sites updated) so `db_update.c`
+  can reuse it. An incomparable pair is `BJ_ERR_STATE` — unlike a filter's
+  "incomparable never matches", a value-producing operator can't silently
+  do nothing. A missing field is seeded with the operand directly.
+- **`$mul`** — like `$inc` but multiplies; a missing field seeds at base
+  `0` (matches real MongoDB: multiplying the implicit base `0`).
+- **`$rename`** — the one operator that doesn't fit the "one key, one
+  transform" shape every other operator uses, since it touches two field
+  names. Handled as a small two-pass addition to `upd_apply`: a pre-pass
+  decodes each rename's destination name and checks (via `obj_get_field`)
+  whether its source is present in the document at all; the main scan
+  captures the source's value (without emitting it under the old name)
+  and suppresses any untouched key that happens to equal an *active*
+  rename's destination (about to be overwritten); a trailing pass emits
+  the captured value under the new name for every rename whose source was
+  present. A rename with an absent source is a complete no-op — it
+  doesn't touch a pre-existing destination field either, matching real
+  MongoDB. `parse_update` separately validates each destination (not
+  dotted, not `_id`, no collision with another operator's target field or
+  another rename's destination — old == new is allowed as a harmless
+  identity rename); collision with a pre-existing *document* field is
+  deliberately not checked at parse time, since that's resolved
+  dynamically at apply time by design (the field is just overwritten).
+- **`$currentDate`** — resolved entirely in `src/binjson-wasm.js`, not
+  C: only the JS host has a clock (the same reasoning that already puts
+  `_id` generation in JS). A new `resolveCurrentDate()` helper, called at
+  the top of `updateOne`/`updateMany`/`findOneAndUpdate`, rewrites
+  `{$currentDate: {field: true | {$type: 'date'}}}` into a merged `$set`
+  on a shallow copy of the update (never mutating the caller's object)
+  before anything crosses the WASM bridge — `db_update.c` never sees
+  `$currentDate` at all. `{$type: 'timestamp'}` (no timestamp wire type
+  exists) and a destination collision with another top-level operator
+  both throw client-side.
+- **`$setOnInsert`** — `upd_apply` gained an `is_insert` parameter (all 4
+  call sites in `db.c` updated: `dc_update_one`/`dc_update_many`'s
+  matched branches pass `0`, their upsert-seed branches pass `1`).
+  `$setOnInsert` fields behave exactly like `$set` when `is_insert` is
+  true and are a complete no-op (the field, if present, passes through
+  unchanged; if absent, it's never created) when false — while still
+  participating in the ordinary one-operator-per-field collision check.
+- **`$pop`**/**`$pullAll`**/**`$bit`** — `$pop` drops the first (`-1`) or
+  last (`1`) array element (no-op if the field is absent, error if
+  present but not an array). `$pullAll` drops every element byte-equal to
+  *any* of its operand array's values (no operator-expression form,
+  unlike `$pull`). `$bit` applies one or more of `and`/`or`/`xor`
+  (chained, in encounter order) to an `INT` field, defaulting the base to
+  `0` if the field is absent; a `FLOAT` field is rejected (no bitwise ops
+  on floats).
+- **`$push` modifiers** — `$each`/`$slice`/`$sort`/`$position`, triggered
+  only when the operand is an object containing a `$each` key (any of the
+  other three without `$each` is rejected), using `db_query.h`'s
+  `val_list` for the intermediate element list. `$sort` only supports
+  direct `1`/`-1` value comparison (no document-key sort form for arrays
+  of subdocuments — a documented scope limit) and overrides `$position`
+  when both are given, matching real MongoDB.
+- **`$pull` query-condition support** — `{$pull: {field: {$gt: 5}}}` in
+  addition to the existing byte-equality form. A new `qry_value_matches_expr`
+  exposed from `db_query.h`, reusing the exact `expand_candidates` +
+  `eval_operator_expr` machinery `$elemMatch`'s operator-expression branch
+  already used internally — the same "reuse the matcher" shape the
+  original plan called out.
+
+Bug caught during implementation: an existing milestone-4 test used
+`{$mul: {age: 2}}` as its example of an "unrecognized operator" (predating
+`$mul`'s implementation here); once implemented it silently stopped being
+unrecognized and the test started failing for the right reason. Fixed by
+switching the example to `$foo` (mirroring the identical fix milestone 11
+needed for a stale `$regex`-as-example test).
+
+No new WASM exports; `c/build-wasm.sh` is unchanged (no new source
+files). `db.c`'s 4 `upd_apply` call sites and `db_update.h`/`db_query.h`'s
+top comments were updated to match. 19 new tests in `test/db.test.js`'s
+`update operator completeness (milestone 10)` block, plus the one
+`$mul`-example fix above; full suite 592/592 and browser suite 5/5
+passing.
 
 ### Milestone 11 — Query operator completeness — ✅ COMPLETE
 

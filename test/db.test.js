@@ -872,7 +872,7 @@ describe('db: update operators (milestone 4)', () => {
     const users = await db.collection('users');
     const { insertedId } = await users.insertOne({ name: 'Ada', age: 36 });
     await expect(users.updateOne({ _id: insertedId }, { $set: { _id: new ObjectId() } })).rejects.toThrow();
-    await expect(users.updateOne({ _id: insertedId }, { $mul: { age: 2 } })).rejects.toThrow();
+    await expect(users.updateOne({ _id: insertedId }, { $foo: { age: 2 } })).rejects.toThrow();
     await expect(
       users.updateOne({ _id: insertedId }, { $set: { age: 1 }, $inc: { age: 1 } })
     ).rejects.toThrow();
@@ -949,6 +949,265 @@ describe('db: update operators (milestone 4)', () => {
     await users.updateOne({ _id: insertedId }, { $set: { team: 'kernel' } });
     expect(await users.findByIndex('team_1', ['core'])).toEqual([]);
     expect((await users.findByIndex('team_1', ['kernel'])).map(d => d.name)).toEqual(['Ada']);
+    await db.close();
+  });
+});
+
+describe('db: update operator completeness (milestone 10)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  it('$addToSet appends only if absent, including via $each', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', tags: ['core'] });
+
+    await users.updateOne({ _id: insertedId }, { $addToSet: { tags: 'core' } });
+    expect((await users.findOne({ _id: insertedId })).tags).toEqual(['core']);
+
+    await users.updateOne({ _id: insertedId }, { $addToSet: { tags: 'admin' } });
+    expect((await users.findOne({ _id: insertedId })).tags).toEqual(['core', 'admin']);
+
+    await users.updateOne({ _id: insertedId }, { $addToSet: { tags: { $each: ['admin', 'root', 'root'] } } });
+    expect((await users.findOne({ _id: insertedId })).tags).toEqual(['core', 'admin', 'root']);
+
+    await users.updateOne({ _id: insertedId }, { $addToSet: { badges: 'first' } });
+    expect((await users.findOne({ _id: insertedId })).badges).toEqual(['first']);
+    await db.close();
+  });
+
+  it('$min/$max keep the smaller/larger value and seed a missing field', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', score: 50 });
+
+    await users.updateOne({ _id: insertedId }, { $min: { score: 80 } });
+    expect((await users.findOne({ _id: insertedId })).score).toBe(50);
+    await users.updateOne({ _id: insertedId }, { $min: { score: 20 } });
+    expect((await users.findOne({ _id: insertedId })).score).toBe(20);
+
+    await users.updateOne({ _id: insertedId }, { $max: { score: 10 } });
+    expect((await users.findOne({ _id: insertedId })).score).toBe(20);
+    await users.updateOne({ _id: insertedId }, { $max: { score: 99 } });
+    expect((await users.findOne({ _id: insertedId })).score).toBe(99);
+
+    await users.updateOne({ _id: insertedId }, { $min: { rank: 5 } });
+    expect((await users.findOne({ _id: insertedId })).rank).toBe(5);
+
+    await expect(users.updateOne({ _id: insertedId }, { $min: { name: 5 } })).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$mul multiplies an existing field and seeds a missing one at 0', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', price: 10 });
+
+    await users.updateOne({ _id: insertedId }, { $mul: { price: 3, quantity: 5 } });
+    const doc = await users.findOne({ _id: insertedId });
+    expect(doc.price).toBe(30);
+    expect(doc.quantity).toBe(0);
+    await db.close();
+  });
+
+  it('$rename moves a field, no-ops if the source is absent, and rejects collisions', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', nick: 'Countess', team: 'core' });
+
+    await users.updateOne({ _id: insertedId }, { $rename: { nick: 'nickname' } });
+    expect(await users.findOne({ _id: insertedId })).toEqual({
+      _id: insertedId, name: 'Ada', team: 'core', nickname: 'Countess'
+    });
+
+    // Missing source is a total no-op -- it doesn't touch a pre-existing
+    // destination field either.
+    await users.updateOne({ _id: insertedId }, { $rename: { ghost: 'team' } });
+    expect((await users.findOne({ _id: insertedId })).team).toBe('core');
+
+    // A rename's destination colliding with another operator's own target
+    // field name is rejected (a pre-existing document field it isn't
+    // otherwise targeting is not, though -- it's just overwritten).
+    await expect(
+      users.updateOne({ _id: insertedId }, { $set: { team: 'x' }, $rename: { name: 'team' } })
+    ).rejects.toThrow();
+    await expect(
+      users.updateOne({ _id: insertedId }, { $rename: { name: 'x', nickname: 'x' } })
+    ).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$rename overwrites a pre-existing destination field when the source is present', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', oldTeam: 'kernel', team: 'core' });
+
+    await users.updateOne({ _id: insertedId }, { $rename: { oldTeam: 'team' } });
+    expect(await users.findOne({ _id: insertedId })).toEqual({ _id: insertedId, name: 'Ada', team: 'kernel' });
+    await db.close();
+  });
+
+  it('$currentDate sets a Date via true or {$type: "date"}, and validates', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada' });
+
+    await users.updateOne({ _id: insertedId }, { $currentDate: { lastSeen: true } });
+    const doc = await users.findOne({ _id: insertedId });
+    expect(doc.lastSeen).toBeInstanceOf(Date);
+
+    await users.updateOne({ _id: insertedId }, { $currentDate: { lastSeen: { $type: 'date' } } });
+    expect((await users.findOne({ _id: insertedId })).lastSeen).toBeInstanceOf(Date);
+
+    await expect(
+      users.updateOne({ _id: insertedId }, { $currentDate: { lastSeen: { $type: 'timestamp' } } })
+    ).rejects.toThrow();
+    await expect(
+      users.updateOne({ _id: insertedId }, { $currentDate: { name: true }, $set: { name: 'x' } })
+    ).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$setOnInsert only applies when an upsert actually inserts', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', createdAt: 'original' });
+
+    // Matched update: $setOnInsert is a complete no-op.
+    await users.updateOne(
+      { _id: insertedId },
+      { $set: { team: 'core' }, $setOnInsert: { createdAt: 'ignored' } }
+    );
+    expect((await users.findOne({ _id: insertedId })).createdAt).toBe('original');
+
+    // Upsert-and-inserted: $setOnInsert applies alongside $set.
+    const result = await users.updateOne(
+      { name: 'Ghost' },
+      { $set: { team: 'core' }, $setOnInsert: { createdAt: 'fresh' } },
+      { upsert: true }
+    );
+    expect(await users.findOne({ _id: result.upsertedId })).toEqual({
+      _id: result.upsertedId, name: 'Ghost', team: 'core', createdAt: 'fresh'
+    });
+
+    await expect(
+      users.updateOne({ _id: insertedId }, { $set: { team: 'x' }, $setOnInsert: { team: 'y' } })
+    ).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$setOnInsert applies via updateMany\'s upsert-and-inserted path too', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const result = await users.updateMany(
+      { team: 'ghosts' },
+      { $set: { seen: true }, $setOnInsert: { createdAt: 'fresh' } },
+      { upsert: true }
+    );
+    expect(await users.findOne({ _id: result.upsertedId })).toEqual({
+      _id: result.upsertedId, team: 'ghosts', seen: true, createdAt: 'fresh'
+    });
+    await db.close();
+  });
+
+  it('$pop removes the last or first element, and no-ops on a missing field', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', queue: ['a', 'b', 'c'] });
+
+    await users.updateOne({ _id: insertedId }, { $pop: { queue: 1 } });
+    expect((await users.findOne({ _id: insertedId })).queue).toEqual(['a', 'b']);
+    await users.updateOne({ _id: insertedId }, { $pop: { queue: -1 } });
+    expect((await users.findOne({ _id: insertedId })).queue).toEqual(['b']);
+
+    await users.updateOne({ _id: insertedId }, { $pop: { missing: 1 } });
+    expect(await users.findOne({ _id: insertedId })).not.toHaveProperty('missing');
+
+    await expect(users.updateOne({ _id: insertedId }, { $pop: { name: 1 } })).rejects.toThrow();
+    await expect(users.updateOne({ _id: insertedId }, { $pop: { queue: 2 } })).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$pullAll removes every listed value and no-ops on a missing field', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', tags: ['a', 'b', 'c', 'b'] });
+
+    await users.updateOne({ _id: insertedId }, { $pullAll: { tags: ['b', 'c'] } });
+    expect((await users.findOne({ _id: insertedId })).tags).toEqual(['a']);
+
+    await users.updateOne({ _id: insertedId }, { $pullAll: { missing: ['x'] } });
+    expect(await users.findOne({ _id: insertedId })).not.toHaveProperty('missing');
+    await db.close();
+  });
+
+  it('$bit applies and/or/xor, chained, defaulting a missing field to 0', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', flags: 0b1010 });
+
+    await users.updateOne({ _id: insertedId }, { $bit: { flags: { or: 0b0101 } } });
+    expect((await users.findOne({ _id: insertedId })).flags).toBe(0b1111);
+
+    await users.updateOne({ _id: insertedId }, { $bit: { flags: { and: 0b1100 } } });
+    expect((await users.findOne({ _id: insertedId })).flags).toBe(0b1100);
+
+    await users.updateOne({ _id: insertedId }, { $bit: { flags: { xor: 0b1111 } } });
+    expect((await users.findOne({ _id: insertedId })).flags).toBe(0b0011);
+
+    await users.updateOne({ _id: insertedId }, { $bit: { missing: { or: 0b101 } } });
+    expect((await users.findOne({ _id: insertedId })).missing).toBe(0b101);
+
+    await expect(users.updateOne({ _id: insertedId }, { $bit: { name: { or: 1 } } })).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$push modifiers: $each, $slice, $sort, $position', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', scores: [3, 1] });
+
+    await users.updateOne({ _id: insertedId }, { $push: { scores: { $each: [4, 2] } } });
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([3, 1, 4, 2]);
+
+    await users.updateOne({ _id: insertedId }, { $set: { scores: [3, 1] } });
+
+    await users.updateOne({ _id: insertedId }, { $push: { scores: { $each: [4, 2], $slice: 3 } } });
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([3, 1, 4]);
+
+    await users.updateOne({ _id: insertedId }, { $set: { scores: [3, 1] } });
+    await users.updateOne({ _id: insertedId }, { $push: { scores: { $each: [4, 2], $slice: -2 } } });
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([4, 2]);
+
+    await users.updateOne({ _id: insertedId }, { $set: { scores: [3, 1] } });
+    await users.updateOne({ _id: insertedId }, { $push: { scores: { $each: [9], $sort: 1 } } });
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([1, 3, 9]);
+
+    await users.updateOne({ _id: insertedId }, { $set: { scores: [3, 1] } });
+    await users.updateOne({ _id: insertedId }, { $push: { scores: { $each: [2], $position: 1 } } });
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([3, 2, 1]);
+
+    // $sort overrides $position when both are given.
+    await users.updateOne({ _id: insertedId }, { $set: { scores: [3, 1] } });
+    await users.updateOne(
+      { _id: insertedId },
+      { $push: { scores: { $each: [2], $position: 1, $sort: -1 } } }
+    );
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([3, 2, 1]);
+    await db.close();
+  });
+
+  it('$pull supports a query-operator condition in addition to byte equality', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', scores: [1, 5, 10, 15] });
+
+    await users.updateOne({ _id: insertedId }, { $pull: { scores: { $lt: 10 } } });
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([10, 15]);
+
+    await users.updateOne({ _id: insertedId }, { $pull: { scores: 10 } });
+    expect((await users.findOne({ _id: insertedId })).scores).toEqual([15]);
     await db.close();
   });
 });
