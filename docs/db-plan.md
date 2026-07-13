@@ -415,18 +415,66 @@ primary+index write is crash-safe.
   journal I/O for an index-less collection, journal size bounded once
   indexed, normal CRUD unaffected across close/reopen).
 
-### Milestone 7 — Aggregation pipeline — not started
+### Milestone 7 — Aggregation pipeline — not doing
 
-`$match`/`$sort` reuse the milestone-3 query engine directly; `$group`/
-`$project`/`$lookup` are new execution code. Do this last — biggest single
-chunk of net-new logic, nothing else depends on it.
+`$match`/`$sort` would reuse the milestone-3 query engine directly;
+`$group`/`$project`/`$lookup` would be new execution code — the biggest
+single chunk of net-new logic in the plan, and nothing else depends on it.
+Deliberately deprioritized rather than merely deferred; revisit only if a
+concrete use case needs it.
 
 ## Open decisions / risks not yet addressed
 
-- **OPFS concurrency.** Sync access handles are exclusive per file, so
-  multi-tab/multi-worker access to the same database needs a coordinator
-  (single writer worker + `BroadcastChannel`/Web Locks for the rest). Not
-  designed yet; will shape the `Db`/`Collection` lifecycle once touched.
 - **API target — confirmed, not a risk:** JS API matching the `mongodb`
   Node driver's surface, not the wire protocol. No BSON transcoding needed
   since binjson's `decode()` already returns plain objects/`ObjectId`/`Date`.
+
+## Multi-tab OPFS coordinator — ✅ COMPLETE
+
+Closes the "OPFS concurrency" risk above: `FileSystemSyncAccessHandle`
+(every OPFS file in this repo, via `OPFSStorageProvider`/`registerHandle` in
+`src/binjson-wasm.js`) takes an exclusive, origin-wide lock per file, so a
+second tab opening the same collection used to fail outright. `src/
+db-coordinator.js`'s `connectShared(dbName, provider, options)` lets many
+tabs/workers share one logical database instead.
+
+- **Mechanism**: Web Locks leader election (`navigator.locks.request`) +
+  `BroadcastChannel` RPC, chosen over a `SharedWorker`-as-sole-owner design
+  specifically because iOS Safari has never supported `SharedWorker` at
+  all — using one would have silently broken multi-tab on a platform this
+  repo already targets via OPFS's own Safari 16.4+ requirement. Both APIs
+  work everywhere OPFS itself already requires.
+- **Runs entirely inside each tab's own worker** — no main-thread/worker
+  protocol to design. This repo already requires OPFS access to happen
+  inside a dedicated `Worker` (README.md, `public/worker.js`), and
+  `navigator.locks`/`BroadcastChannel` are both available there too, so
+  leader election, RPC, and the real `Db` all live in the same worker every
+  tab already needs; the tab's main thread is unaware any of this exists.
+- Exactly one calling context becomes leader (the only one that actually
+  calls `connect()`/opens OPFS files); every other context gets a `SharedDb`/
+  `SharedCollection` facade (same public API as `Db`/`Collection`) that
+  proxies every call over one `BroadcastChannel` per `dbName`, with payloads
+  **binjson-encoded** (`encode`/`decode` from `src/binjson.js`) rather than
+  JSON so `ObjectId`/`Date` survive the trip. A follower re-checks its role
+  at call time, not just at connect time, so a tab that starts as a
+  follower and later gets promoted (the previous leader closed) starts
+  serving its own calls locally with no facade change.
+- **Handover**: on a timed-out request, a follower re-broadcasts
+  `whoIsLeader` and gives a new leader a bounded window to appear before one
+  retry; the leader also heartbeats an `announce` every 2s so followers that
+  joined late self-heal without needing a failed request first.
+  Deliberately conservative (one bounded retry, not open-ended backoff) —
+  matches this repo's documented-limitation style elsewhere over building a
+  fully general retry system for an edge case.
+- **Tests**: `test/db-coordinator.test.js` (5 tests, plain Node — modern
+  Node ships spec-compliant `navigator.locks`/`BroadcastChannel` globals, so
+  this exercises the real election/RPC/handover code paths, just without
+  real OPFS or real separate Worker isolates) and `test/
+  db-coordinator.browser.test.js` (real Chromium via `npm run test:browser`
+  — real Workers standing in for tabs, since Workers of one origin already
+  share OPFS/Locks/BroadcastChannel the same way tabs do; covers the one
+  thing the Node suite can't: an abrupt `Worker.terminate()` releasing a
+  held Web Lock, not just a graceful `close()`).
+- `package.json` gained a `"./db-shared"` export (`src/db-coordinator.js`)
+  alongside the existing `"./db"` — `src/db.js`/`connect()` are completely
+  unchanged, so existing single-tab consumers see no difference.

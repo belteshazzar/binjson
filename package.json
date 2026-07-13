@@ -7,7 +7,8 @@
   "exports": {
     ".": "./src/binjson.js",
     "./wasm": "./src/binjson-wasm.js",
-    "./db": "./src/db.js"
+    "./db": "./src/db.js",
+    "./db-shared": "./src/db-coordinator.js"
   },
   "bin": {
     "binjson": "bin/binjson.js",
@@ -26,6 +27,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:browser": "vitest run --config vitest.browser.config.js",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
     "build:worker": "rollup -c rollup.config.js && cp lib/binjson.wasm site/binjson.wasm",
@@ -57,9 +59,11 @@
     "node-opfs": "^1.0.0",
     "playwright": "^1.49.1",
     "rollup": "^4.31.0",
+    "stemmer": "^2.0.1",
     "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "@playwright/test": "^1.61.1"
   }
 }
