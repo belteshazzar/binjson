@@ -1902,6 +1902,12 @@ function textIndexFileNames(collectionName, indexName) {
   return { index: `${base}-terms.bj`, docTerms: `${base}-documents.bj`, docLengths: `${base}-lengths.bj` };
 }
 
+/** Cross-file commit journal (milestone 5, docs/db-plan.md): makes every
+ * document write atomic across the primary tree + attached index files. */
+function journalFileName(collectionName) {
+  return `coll-${collectionName}-journal.bj`;
+}
+
 /** Default index name mirroring the real driver's convention: "team_1",
  * "team_1_age_1" for a compound index. Only ascending (1) fields are
  * supported so far — descending order only changes scan direction, which a
@@ -1983,6 +1989,19 @@ class Collection {
     //   { kind: 'text', field, trees: {index,docTerms,docLengths}, files: {...} }
     //   { kind: 'geo', field, rt, file }
     this._indexes = new Map();
+    this._journal = null;    // sync access handle for the cross-file commit journal
+    this._journalFd = -1;
+  }
+
+  /** Close every already-opened index tree/rtree (not the primary tree or
+   * the journal) -- shared by normal close and open()'s failure cleanup. */
+  async _closeIndexes() {
+    for (const ix of this._indexes.values()) {
+      if (ix.kind === 'equality') await ix.tree.close();
+      else if (ix.kind === 'text') { for (const role of Object.keys(ix.trees)) await ix.trees[role].close(); }
+      else await ix.rt.close();
+    }
+    this._indexes.clear();
   }
 
   async _open() {
@@ -2048,15 +2067,38 @@ class Collection {
         this._indexes.set(def.name, { kind: 'geo', field: def.field, rt, file: def.file });
       }
     }
+
+    // Cross-file commit journal (milestone 5): must be recovered only after
+    // every index above is attached, mirroring TextIndex's tix_recover
+    // contract ("right after all trees are open"). Always on -- every
+    // collection gets this consistency guarantee automatically.
+    this._journal = await this._provider.openFile(journalFileName(this.name), { create: true });
+    this._journalFd = registerHandle(M, this._journal);
+    const rc = M._dcw_collection_recover(this._collCtx, this._journalFd);
+    if (rc !== 0) {
+      unregisterHandle(M, this._journalFd);
+      this._journalFd = -1;
+      this._journal.close();
+      this._journal = null;
+      await this._closeIndexes();
+      requireModule()._dcw_collection_free(this._collCtx);
+      this._collCtx = 0;
+      requireModule()._dcw_out_free(this._outCtx);
+      this._outCtx = 0;
+      await this._tree.close();
+      throw codeError(rc, 'recover');
+    }
   }
 
   async _close() {
-    for (const ix of this._indexes.values()) {
-      if (ix.kind === 'equality') await ix.tree.close();
-      else if (ix.kind === 'text') { for (const role of Object.keys(ix.trees)) await ix.trees[role].close(); }
-      else await ix.rt.close();
+    await this._closeIndexes();
+    if (this._journalFd >= 0) {
+      unregisterHandle(requireModule(), this._journalFd);
+      this._journalFd = -1;
+      this._journal.flush();
+      this._journal.close();
+      this._journal = null;
     }
-    this._indexes.clear();
     if (this._collCtx) {
       requireModule()._dcw_collection_free(this._collCtx);
       this._collCtx = 0;
@@ -2517,6 +2559,7 @@ class Db {
       }
     }
     await this._provider.deleteFile(entry.file);
+    await this._provider.deleteFile(journalFileName(name));
     return true;
   }
 }

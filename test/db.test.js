@@ -1026,6 +1026,62 @@ describe('db: geo index ($near/$geoWithin, milestone 6)', () => {
   });
 });
 
+describe('db: cross-file write atomicity (milestone 5)', () => {
+  // Every collection gets a commit journal automatically -- see docs/db-plan.md
+  // milestone 5 and test/db.atomic-wasm.test.js for crash-simulation coverage.
+  // These are non-crash sanity checks: normal operation is unaffected, and the
+  // journal file's size tracks the documented bounds.
+  function journalSize(provider, collName) {
+    const handle = provider._files.get(`coll-${collName}-journal.bj`);
+    return handle ? handle.getSize() : 0;
+  }
+
+  it('a collection with no secondary indexes never writes to its journal', async () => {
+    const provider = new MemoryStorageProvider();
+    const db = await connect(provider);
+    const users = await db.collection('users');
+    await users.insertOne({ name: 'Ada' });
+    await users.insertOne({ name: 'Grace' });
+    await users.deleteOne({ name: 'Ada' });
+    expect(journalSize(provider, 'users')).toBe(0);
+    await db.close();
+  });
+
+  it('journal size stays bounded by two slots once indexes are attached', async () => {
+    const provider = new MemoryStorageProvider();
+    const db = await connect(provider);
+    const users = await db.collection('users');
+    await users.createIndex({ team: 1 });
+    // n = primary(1) + equality(1) = 2 files/slot -> slot = 24 + 8*2 = 40.
+    const maxSize = 2 * (24 + 8 * 2);
+    for (let i = 0; i < 20; i++) {
+      await users.insertOne({ name: `user-${i}`, team: i % 2 === 0 ? 'core' : 'infra' });
+      expect(journalSize(provider, 'users')).toBeLessThanOrEqual(maxSize);
+    }
+    await db.close();
+  });
+
+  it('CRUD operations are unaffected by journaling across close/reopen', async () => {
+    const provider = new MemoryStorageProvider();
+    const db1 = await connect(provider);
+    const users1 = await db1.collection('users');
+    await users1.createIndex({ team: 1 });
+    const { insertedId } = await users1.insertOne({ name: 'Ada', team: 'core' });
+    await users1.updateOne({ _id: insertedId }, { $set: { team: 'infra' } });
+    await db1.close();
+
+    const db2 = await connect(provider);
+    const users2 = await db2.collection('users');
+    const doc = await users2.findOne({ _id: insertedId });
+    expect(doc.team).toBe('infra');
+    expect((await users2.findByIndex('team_1', ['infra'])).map(d => d._id.toHexString()))
+      .toEqual([insertedId.toHexString()]);
+    await users2.deleteOne({ _id: insertedId });
+    expect(await users2.findOne({ _id: insertedId })).toBeNull();
+    await db2.close();
+  });
+});
+
 const { hasOPFS } = await bootstrapOPFS();
 
 describe.skipIf(!hasOPFS)('db: OPFS storage provider', () => {

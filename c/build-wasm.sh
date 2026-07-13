@@ -84,7 +84,7 @@ ALL_EXPORTS='_malloc,_free,'\
 '_tixw_recover,_tixw_add,_tixw_remove,_tixw_clear,_tixw_query,_tixw_query_all,_tixw_term_count,'\
 '_tixw_out_new,_tixw_out_free,_tixw_out_ptr,_tixw_out_len,'\
 `# db (document collections, on top of bplustree)`\
-'_dcw_collection_open,_dcw_collection_free,'\
+'_dcw_collection_open,_dcw_collection_free,_dcw_collection_recover,'\
 '_dcw_collection_attach_index,_dcw_collection_add_index,_dcw_collection_remove_index,'\
 '_dcw_collection_attach_text_index,_dcw_collection_add_text_index,'\
 '_dcw_collection_attach_geo_index,_dcw_collection_add_geo_index,'\

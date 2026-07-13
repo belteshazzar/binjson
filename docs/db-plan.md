@@ -344,14 +344,76 @@ collection (matches MongoDB).
   `$center`/residual-filter/maintenance/tolerant-missing-but-strict-
   malformed/requires-an-index/persistence).
 
-### Milestone 5 — Transactions — not started
+### Milestone 5 — Transactions — ✅ COMPLETE
 
-Cross-document/cross-collection atomicity, now spanning all three index
-kinds (equality `bpt` trees, `TextIndex`'s three trees, `rtree`) since
-milestone 6 was pulled forward. Generalize `textindex.c`'s journal pattern
-(`tix_recover`, `bpt_rewind`, see `docs/textindex-atomicity.md`) from "3
-fixed trees" to "N collection + index files (of any kind) touched by one
-logical operation."
+Scoped down from the original "cross-document/cross-collection atomicity"
+framing to what actually matters for a single-writer embedded database:
+**every document write (`insertOne`/`deleteOne`/`replaceOne`/`updateOne`,
+and each matched document within `updateMany`) is now atomic across the
+primary tree and every attached index's file(s)**, closing milestone
+2/6's carried-forward gap. This is not multi-document ACID
+sessions/transactions (no `startSession`/`commitTransaction` surface) —
+`updateMany`'s documents are not atomic *with each other*, matching real
+MongoDB's own non-session behavior; only each individual document's
+primary+index write is crash-safe.
+
+- **Generalizes `textindex.c`'s fixed-3-tree journal** (`tix_recover`,
+  `bpt_rewind`, `docs/textindex-atomicity.md`) to a variable N: primary tree
+  + every attached index's file(s) (equality/geo: 1, text: 3), scoped per
+  `dc_collection`. Same mechanism: an append-only file can be rewound to any
+  prior commit boundary, which exactly restores that historical, consistent
+  state, so a two-slot ping-pong journal recording "how long every file was"
+  after each committed write turns multi-file crash recovery into a handful
+  of truncate calls. Slot layout: `magic "DCTJ"(4) + version(4) + txn(8) +
+  file_count(4) + N×8-byte lengths + crc32(4)`, two slots at offset 0 and
+  `slot_size(n) = 24 + 8n`, journal write always last (an operation is
+  committed iff its slot landed).
+- **`file_count` is part of the CRC'd payload**: a slot whose stored count
+  doesn't match the collection's *current* live index count is treated as
+  undecodable, same as a CRC failure — this matters because N changes
+  whenever `createIndex`/`dropIndex` runs. The journal is truncated to empty
+  the moment an index is added or removed (in `db.c`, transparent to the
+  host), so every pair of slots ever compared shares the same N; an empty
+  journal imposes no constraint regardless of what N becomes next, matching
+  `tix_clear`'s own "reset first" convention for a non-atomic structural
+  change. Index *creation* itself keeps milestone 2's pre-existing
+  all-or-nothing bookkeeping-rollback story, unrelated to and unchanged by
+  this journal.
+- **Journal I/O is skipped entirely for a collection with no secondary
+  indexes** (`commit_journal`/`dc_collection_recover` both no-op when
+  `index_count == 0`): a lone primary tree is already atomic on its own (one
+  file with its own CRC'd commit trailer), so there's nothing to keep in
+  sync and no reason to pay extra synchronous OPFS round-trips per write.
+- **`rtree.h`/`rtree.c` gained `rtree_file_len`/`rtree_rewind`**, ported
+  near-verbatim from `bplustree.c`'s `bpt_file_len`/`bpt_rewind` using
+  rtree's own metadata-record format — the one primitive this
+  generalization needed that milestone 6 hadn't required yet.
+- **Commit sites**: `dc_insert_one`, `dc_delete_one`, `dc_replace_one`'s and
+  `dc_update_one`'s matched-document branches, and once per matched document
+  inside `dc_update_many`'s loop (their upsert-no-match branches all
+  delegate to `dc_insert_one`, already covered — no double commit). A failed
+  journal-commit still surfaces as the operation's error even though the
+  underlying tree writes already landed durably, matching `tix_add`'s own
+  `if (!e && journal) e = tixj_commit(...)` convention.
+- **Always on, no opt-in flag**: unlike `TextIndex`'s optional `journal`
+  constructor argument, `Collection` now opens a `coll-${name}-journal.bj`
+  file automatically (`Db`/`Collection` in `src/binjson-wasm.js`) — a
+  baseline consistency guarantee every collection gets for free, not a
+  feature callers request. Recovery (`dcw_collection_recover` /
+  `dc_collection_recover`) runs once, right after every catalog index has
+  been reattached, mirroring `tix_recover`'s "right after every file is
+  open" contract; a failed recovery closes everything back down and throws,
+  the same shape as `TextIndex.open()`'s own failure path.
+- `test/db.atomic-wasm.test.js` — 9 OPFS crash-simulation tests (normal
+  operation stays bounded to two ping-pong slots; a lost journal write and a
+  partially-persisted write both roll back whole; falling back to the
+  previous slot when the newest is unsatisfiable; refusing to open when
+  every file is behind every journal record; `deleteOne`/`replaceOne`/
+  `updateOne`/`updateMany` roll back the same way as `insertOne`;
+  `createIndex` resets the journal and recovery still works at the new N).
+  `test/db.test.js` gained 3 `MemoryStorageProvider` sanity checks (no
+  journal I/O for an index-less collection, journal size bounded once
+  indexed, normal CRUD unaffected across close/reopen).
 
 ### Milestone 7 — Aggregation pipeline — not started
 
