@@ -85,7 +85,7 @@ composite-key index entries on `insertOne`/`replaceOne`/`deleteOne`, and
 compound (multi-field) indexes; no `unique` option yet (rejected with a
 clear error rather than silently ignored).
 
-- `c/keyenc.h`, `c/keyenc.c` — order-preserving key encoding, a C port of
+- `c/db_keyenc.h`, `c/db_keyenc.c` — order-preserving key encoding, a C port of
   `orderedKey`/`compositeKey`/`compositeUpperBound` (JS versions
   unchanged, still used directly by advanced `BPlusTree` callers). Resolved
   the open question from the milestone-1 writeup **in favor of C**: index
@@ -94,7 +94,7 @@ clear error rather than silently ignored).
   addition beyond a literal port: a dedicated `0x02` tag for the trailing
   primary-key (ObjectId) suffix, needed so the `compositeUpperBound`-style
   `+0xff` sentinel can't be corrupted by an id byte that happens to be
-  `0xff` itself (see `keyenc.h` for the full argument).
+  `0xff` itself (see `db_keyenc.h` for the full argument).
 - `c/db.h`/`c/db.c` — introduced `dc_collection` (opaque struct bundling
   the primary `bpt*` with zero or more attached `dc_index` registrations);
   every CRUD function's signature moved from `bpt *t` to `dc_collection
@@ -129,7 +129,7 @@ own journal milestone (`docs/textindex-atomicity.md`).
 ### Milestone 3 — Query engine — ✅ COMPLETE
 
 Operator-aware filter matching, `sort`/`skip`/`limit`, projections, and an
-equality-index planner, all in a new `c/query.h`/`c/query.c`, replacing
+equality-index planner, all in a new `c/db_query.h`/`c/db_query.c`, replacing
 `db.c`'s milestone-1 placeholder byte-equality matcher (`dc_matches`,
 removed).
 
@@ -144,7 +144,7 @@ removed).
   `$`-operator (`$regex`, `$type`, `$size`, `$all`, `$elemMatch` — not
   implemented) is a hard error, never a silent no-op that would look like
   it matched everything.
-- **Deliberately deferred, documented in `query.h`**: `$regex`/`$type`/
+- **Deliberately deferred, documented in `db_query.h`**: `$regex`/`$type`/
   `$mod`/`$size`/`$all`/`$elemMatch`; MongoDB's null-matches-missing quirk;
   full cross-BSON-type ordering (comparisons only order number-vs-number
   and string-vs-string; anything else never matches); dotted paths that
@@ -178,9 +178,9 @@ removed).
   `countDocuments` needed no JS changes at all — they already called into
   `dc_find_one`/`dc_count`, which automatically gained operator support and
   planner use on the C side.
-- Consolidated `obj_get_field` (was duplicated in `db.c` and `query.c`)
+- Consolidated `obj_get_field` (was duplicated in `db.c` and `db_query.c`)
   into `bjcursor.h` as a shared `static inline`, and added `dbuf_dup` to
-  `dbuf.h` (was `db.c`'s local `dup_bytes`, now also used by `query.c`) —
+  `dbuf.h` (was `db.c`'s local `dup_bytes`, now also used by `db_query.c`) —
   matching `bjcursor.h`'s own stated purpose of centralizing helpers that
   would otherwise be copy-pasted across the C data structures.
 - `test/db.test.js` — 13 new tests (each operator family, dot-paths, array
@@ -192,14 +192,14 @@ removed).
   planned, and a top-level `$or` that can't be planned).
 
 All C sources (`binjson.c`, `bjfile.c`, `hostio.c`, `bplustree.c`, `geo.c`,
-`rtree.c`, `diff.c`, `textlog.c`, `stemmer.c`, `textindex.c`, `keyenc.c`,
-`query.c`, `db.c`) compile and link cleanly together natively, in addition
+`rtree.c`, `diff.c`, `textlog.c`, `stemmer.c`, `textindex.c`, `db_keyenc.c`,
+`db_query.c`, `db.c`) compile and link cleanly together natively, in addition
 to the Emscripten/WASM build.
 
 ### Milestone 4 — Update operators — ✅ COMPLETE
 
 `updateOne`/`updateMany` with `$set`/`$unset`/`$inc`/`$push`/`$pull` and
-upsert, in a new `c/update.h`/`c/update.c`, wired into `db.c` alongside
+upsert, in a new `c/db_update.h`/`c/db_update.c`, wired into `db.c` alongside
 `dc_replace_one`.
 
 - **Operators implemented**: `$set` (create or overwrite, spliced verbatim
@@ -210,7 +210,7 @@ upsert, in a new `c/update.h`/`c/update.c`, wired into `db.c` alongside
   fresh array if the field is absent; errors if it exists and isn't an
   array), `$pull` (remove every element *byte-equal* to the operand; no-op
   if the field is absent; errors if it exists and isn't an array).
-- **Scope, deliberately conservative** (documented in `update.h`): target
+- **Scope, deliberately conservative** (documented in `db_update.h`): target
   field names are top-level only — no dotted paths, no auto-vivifying
   intermediate objects (real MongoDB behavior, not implemented). A field
   may be targeted by at most one operator per update (MongoDB's own
@@ -254,7 +254,7 @@ upsert, in a new `c/update.h`/`c/update.c`, wired into `db.c` alongside
   `updateMany` matching several documents, `updateMany` upsert, and index
   maintenance on an indexed field change).
 
-All C sources, now including `update.c`, continue to compile and link
+All C sources, now including `db_update.c`, continue to compile and link
 cleanly together natively in addition to the Emscripten/WASM build.
 
 ### Milestone 6 — `$text` and geospatial operators — ✅ COMPLETE
@@ -292,7 +292,7 @@ collection (matches MongoDB).
   **kilometers**, not meters/radians (consistency with `rtree.h`'s own
   km-based API); `$geoWithin` requires an index too (real MongoDB allows an
   unindexed collection scan) — avoids duplicating point-in-shape math in
-  `query.c` for what's, in practice, an uncommon unindexed-geo-scan case.
+  `db_query.c` for what's, in practice, an uncommon unindexed-geo-scan case.
   Legacy `$box`/`$center` syntax was chosen over GeoJSON-`$geometry`+
   polygon or `$centerSphere`+radians specifically because it sidesteps
   both the "rtree is point-only, can't do polygons" gap and the
@@ -309,7 +309,7 @@ collection (matches MongoDB).
   `dc_count`/`dc_update_many`: it recognizes at most one `$text`/`$near`/
   `$geoWithin` clause at the filter's *top level* only (not nested under
   `$and`/`$or`/`$nor` — falls through to a full scan there, where
-  `query.c` correctly rejects `$near`/`$geoWithin` as unrecognized
+  `db_query.c` correctly rejects `$near`/`$geoWithin` as unrecognized
   operators rather than silently ignoring them), resolves it via the
   matching index, and builds a *residual filter* (the original filter
   minus that one clause) to re-apply to each candidate — same

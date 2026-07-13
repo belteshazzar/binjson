@@ -1,5 +1,5 @@
 /*
- * keyenc.h — order-preserving byte encoding for B+ tree composite/secondary-
+ * db_keyenc.h — order-preserving byte encoding for B+ tree composite/secondary-
  * index keys. C port of orderedKey/compositeKey/compositeUpperBound in
  * src/binjson-wasm.js; see bplustree.h's key-convention note for the
  * rationale: the tree is unique-key, so a secondary index encodes the
@@ -30,8 +30,8 @@
  * convention) — untagged raw id bytes would occasionally corrupt range-scan
  * upper bounds, since an id's first byte can itself be 0xff.
  */
-#ifndef KEYENC_H
-#define KEYENC_H
+#ifndef DB_KEYENC_H
+#define DB_KEYENC_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -68,4 +68,4 @@ int qk_put_upper_bound(dbuf *out);
 }
 #endif
 
-#endif /* KEYENC_H */
+#endif /* DB_KEYENC_H */

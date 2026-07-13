@@ -1855,7 +1855,7 @@ function applyDelta(source, delta) {
 // A collection is a bpt keyed by the raw 12-byte ObjectId, plus zero or more
 // attached secondary indexes (see db.h). CRUD, secondary-index maintenance,
 // operator-aware filter matching, sort/skip/limit/projection and the
-// equality-index planner are all implemented in C (db.c/query.c/db_wasm.c)
+// equality-index planner are all implemented in C (db.c/db_query.c/db_wasm.c)
 // — this layer only marshals bytes across the WASM bridge, the same way
 // BPlusTree/RTree/TextIndex above do. A database is a root catalog tree
 // (collection name -> backing file name + index list) plus a storage
@@ -1906,7 +1906,7 @@ function textIndexFileNames(collectionName, indexName) {
  * "team_1_age_1" for a compound index. Only ascending (1) fields are
  * supported so far — descending order only changes scan direction, which a
  * caller can already get by reversing results, so it's deferred rather than
- * plumbed through the composite-key encoding (keyenc.h) for no behavioral
+ * plumbed through the composite-key encoding (db_keyenc.h) for no behavioral
  * gain yet. */
 function checkIndexKeySpec(keys) {
   const fields = Object.keys(keys);
@@ -2399,7 +2399,7 @@ class Collection {
 
   /**
    * Apply update operators ($set/$unset/$inc/$push/$pull — see
-   * c/update.h for the exact rules) to the first document matching
+   * c/db_update.h for the exact rules) to the first document matching
    * `filter`. `update`'s top level must be entirely $-prefixed operators;
    * for a full replacement document use replaceOne instead.
    */

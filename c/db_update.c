@@ -1,7 +1,7 @@
 /*
- * update.c — see update.h.
+ * db_update.c — see db_update.h.
  */
-#include "update.h"
+#include "db_update.h"
 #include "bjcursor.h"
 #include "dbuf.h"
 
@@ -65,7 +65,7 @@ static int parse_update(const uint8_t *update, size_t update_len,
             if (fklen == 3 && memcmp(fkp, "_id", 3) == 0) return BJ_ERR_STATE;
             for (uint32_t k = 0; k < fklen; k++) {
                 /* No dotted paths yet -- reject rather than treat "a.b" as
-                 * a literal top-level field name (see update.h). */
+                 * a literal top-level field name (see db_update.h). */
                 if (fkp[k] == '.') return BJ_ERR_STATE;
             }
             for (uint32_t k = 0; k < n; k++) {

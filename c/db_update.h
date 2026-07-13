@@ -1,5 +1,5 @@
 /*
- * update.h — apply MongoDB-style update operators to a document.
+ * db_update.h — apply MongoDB-style update operators to a document.
  *
  * An update document's top level must be entirely $-prefixed operators —
  * $set, $unset, $inc, $push, $pull — each an OBJECT mapping a field name
@@ -7,7 +7,7 @@
  * (BJ_ERR_STATE), since that is replaceOne's job, not updateOne/
  * updateMany's, matching the modern MongoDB driver's own validation.
  *
- * Scope, deliberately conservative (matching how query.h and keyenc.h
+ * Scope, deliberately conservative (matching how db_query.h and db_keyenc.h
  * scope their own first cuts):
  *   - Target field names are top-level only — no dotted paths yet, so
  *     {$set: {"a.b": 1}} is rejected rather than silently doing something
@@ -28,8 +28,8 @@
  *     implemented) and requires the field, if present, to be an ARRAY;
  *     it is a no-op if the field is absent.
  */
-#ifndef UPDATE_H
-#define UPDATE_H
+#ifndef DB_UPDATE_H
+#define DB_UPDATE_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -61,4 +61,4 @@ int upd_validate(const uint8_t *update, size_t update_len);
 }
 #endif
 
-#endif /* UPDATE_H */
+#endif /* DB_UPDATE_H */

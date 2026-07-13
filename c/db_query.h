@@ -1,5 +1,5 @@
 /*
- * query.h — filter matching, sorting, and projection for collection
+ * db_query.h — filter matching, sorting, and projection for collection
  * queries (db.h). Operates purely on binjson bytes (documents, filters,
  * sort/projection specs); knows nothing about bpt or dc_collection.
  *
@@ -38,8 +38,8 @@
  * cross-domain comparison (or against a non-number/non-string) never
  * matches; MongoDB's full cross-BSON-type ordering is not implemented.
  */
-#ifndef QUERY_H
-#define QUERY_H
+#ifndef DB_QUERY_H
+#define DB_QUERY_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -95,4 +95,4 @@ int qry_collect(const qry_doc *docs, size_t count, const qry_options *opts,
 }
 #endif
 
-#endif /* QUERY_H */
+#endif /* DB_QUERY_H */

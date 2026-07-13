@@ -1,7 +1,7 @@
 /*
- * keyenc.c — see keyenc.h.
+ * db_keyenc.c — see db_keyenc.h.
  */
-#include "keyenc.h"
+#include "db_keyenc.h"
 #include "bjcursor.h"
 
 #include <string.h>

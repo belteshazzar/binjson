@@ -1,7 +1,7 @@
 /*
- * query.c — see query.h.
+ * db_query.c — see db_query.h.
  */
-#include "query.h"
+#include "db_query.h"
 #include "bjcursor.h"
 #include "dbuf.h"
 
@@ -11,7 +11,7 @@
 /* ---- field path resolution --------------------------------------------- */
 
 /* Resolve dot-separated `path` against `doc`, descending through nested
- * OBJECTs only -- see query.h's top comment for the array/index limitation. */
+ * OBJECTs only -- see db_query.h's top comment for the array/index limitation. */
 static int resolve_path(const uint8_t *doc, size_t doc_len,
                         const uint8_t *path, uint32_t path_len,
                         const uint8_t **val_ptr, size_t *val_len, int *found) {
@@ -88,7 +88,7 @@ static int value_eq(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen
 }
 
 /* -2 = incomparable (different domains, or not number/string), else
- * -1/0/1. See query.h: only number-vs-number and string-vs-string order. */
+ * -1/0/1. See db_query.h: only number-vs-number and string-vs-string order. */
 static int value_cmp(const uint8_t *a, size_t alen, const uint8_t *b, size_t blen) {
     if (alen < 1 || blen < 1) return -2;
     uint8_t ta = a[0], tb = b[0];
@@ -245,7 +245,7 @@ static int eval_operator_expr(const uint8_t *doc, size_t doc_len,
         } else {
             /* Unrecognized operator ($regex/$type/$size/$all/$elemMatch/...
              * are not implemented yet): fail loudly rather than silently
-             * matching everything -- see query.h. */
+             * matching everything -- see db_query.h. */
             return BJ_ERR_STATE;
         }
 
