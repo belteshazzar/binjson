@@ -2201,31 +2201,43 @@ class Collection {
     return { acknowledged: true, deletedCount: rc };
   }
 
+  /**
+   * Malloc `a`/`b` (encoded) plus a fresh ObjectId's 12 bytes, call
+   * fn(M, aPtr, aLen, bPtr, bLen, idPtr), free everything, and return
+   * { rc, defaultId }. Shared by replaceOne/updateOne/updateMany, which all
+   * pass a filter + a second document and may need a fresh id for an
+   * upsert (see the Db/Collection section's top comment for why JS always
+   * generates one rather than C inventing it).
+   */
+  _marshalTriple(a, b, fn) {
+    const M = requireModule();
+    const aBytes = encode(a);
+    const bBytes = encode(b);
+    const defaultId = new ObjectId();
+    const idBytes = defaultId.toBytes();
+
+    const ap = aBytes.length ? M._malloc(aBytes.length) : 0;
+    const bp = bBytes.length ? M._malloc(bBytes.length) : 0;
+    const dp = M._malloc(12);
+    if (aBytes.length) M.HEAPU8.set(aBytes, ap);
+    if (bBytes.length) M.HEAPU8.set(bBytes, bp);
+    M.HEAPU8.set(idBytes, dp);
+
+    try {
+      return { rc: fn(M, ap, aBytes.length, bp, bBytes.length, dp), defaultId };
+    } finally {
+      if (ap) M._free(ap);
+      if (bp) M._free(bp);
+      M._free(dp);
+    }
+  }
+
   async replaceOne(filter, replacement, { upsert = false } = {}) {
     if (replacement === null || typeof replacement !== 'object' || Array.isArray(replacement)) {
       throw new Error('replaceOne requires a replacement document object');
     }
-    const M = requireModule();
-    const fBytes = encode(filter);
-    const rBytes = encode(replacement);
-    const defaultId = new ObjectId();
-    const idBytes = defaultId.toBytes();
-
-    const fp = fBytes.length ? M._malloc(fBytes.length) : 0;
-    const rp = rBytes.length ? M._malloc(rBytes.length) : 0;
-    const dp = M._malloc(12);
-    if (fBytes.length) M.HEAPU8.set(fBytes, fp);
-    if (rBytes.length) M.HEAPU8.set(rBytes, rp);
-    M.HEAPU8.set(idBytes, dp);
-
-    let rc;
-    try {
-      rc = M._dcw_replace_one(this._collCtx, fp, fBytes.length, rp, rBytes.length, dp, upsert ? 1 : 0);
-    } finally {
-      if (fp) M._free(fp);
-      if (rp) M._free(rp);
-      M._free(dp);
-    }
+    const { rc, defaultId } = this._marshalTriple(filter, replacement, (M, fp, fn, rp, rn, dp) =>
+      M._dcw_replace_one(this._collCtx, fp, fn, rp, rn, dp, upsert ? 1 : 0));
     if (rc < 0) throw codeError(rc, 'replaceOne');
 
     if (rc === 0) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null };
@@ -2234,6 +2246,47 @@ class Collection {
       return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId };
     }
     return { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedId: null };
+  }
+
+  /**
+   * Apply update operators ($set/$unset/$inc/$push/$pull — see
+   * c/update.h for the exact rules) to the first document matching
+   * `filter`. `update`'s top level must be entirely $-prefixed operators;
+   * for a full replacement document use replaceOne instead.
+   */
+  async updateOne(filter, update, { upsert = false } = {}) {
+    if (update === null || typeof update !== 'object' || Array.isArray(update)) {
+      throw new Error('updateOne requires an update document object');
+    }
+    const { rc, defaultId } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
+      M._dcw_update_one(this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0));
+    if (rc < 0) throw codeError(rc, 'updateOne');
+
+    if (rc === 0) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null };
+    if (rc === 2) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: defaultId };
+    return { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedId: null };
+  }
+
+  /**
+   * Like updateOne, but applies to every matching document. Does not
+   * detect no-op updates (e.g. $set to a field's current value already
+   * matching) — modifiedCount always mirrors matchedCount.
+   */
+  async updateMany(filter, update, { upsert = false } = {}) {
+    if (update === null || typeof update !== 'object' || Array.isArray(update)) {
+      throw new Error('updateMany requires an update document object');
+    }
+    const { rc, defaultId } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
+      M._dcw_update_many(this._outCtx, this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0));
+    if (rc !== 0) throw codeError(rc, 'updateMany');
+
+    const result = this._readOut(requireModule());
+    return {
+      acknowledged: true,
+      matchedCount: result.matchedCount,
+      modifiedCount: result.matchedCount,
+      upsertedId: result.upserted ? defaultId : null
+    };
   }
 
   async countDocuments(filter = {}) {

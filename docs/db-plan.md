@@ -196,12 +196,66 @@ All C sources (`binjson.c`, `bjfile.c`, `hostio.c`, `bplustree.c`, `geo.c`,
 `query.c`, `db.c`) compile and link cleanly together natively, in addition
 to the Emscripten/WASM build.
 
-### Milestone 4 — Update operators — not started
+### Milestone 4 — Update operators — ✅ COMPLETE
 
-`$set`/`$unset`/`$inc`/`$push`/`$pull` + upsert, reusing `replaceOne`'s
-splice-in-place pattern (`splice_id` in `db.c`) generalized to arbitrary
-field patches. Every changed field must re-run milestone 2's index
-maintenance.
+`updateOne`/`updateMany` with `$set`/`$unset`/`$inc`/`$push`/`$pull` and
+upsert, in a new `c/update.h`/`c/update.c`, wired into `db.c` alongside
+`dc_replace_one`.
+
+- **Operators implemented**: `$set` (create or overwrite, spliced verbatim
+  — no decode/re-encode needed), `$unset` (drop the field; no-op if
+  absent), `$inc` (numeric, INT-vs-FLOAT result chosen by the same
+  safe-integer rule the JS encoder uses; errors if the existing field or
+  the operand isn't a number), `$push` (append one element, creating a
+  fresh array if the field is absent; errors if it exists and isn't an
+  array), `$pull` (remove every element *byte-equal* to the operand; no-op
+  if the field is absent; errors if it exists and isn't an array).
+- **Scope, deliberately conservative** (documented in `update.h`): target
+  field names are top-level only — no dotted paths, no auto-vivifying
+  intermediate objects (real MongoDB behavior, not implemented). A field
+  may be targeted by at most one operator per update (MongoDB's own
+  "path collision" validation). `_id` can never be targeted. `$push` has
+  no `$each`/`$sort`/`$slice` modifiers. `$pull` only matches by literal
+  equality, not a query-operator condition
+  (`{$pull: {scores: {$lt: 5}}}` is not implemented). An update document
+  whose top level isn't entirely `$`-operators is rejected — that's
+  `replaceOne`'s job, matching the modern MongoDB driver's own validation
+  that `updateOne`/`updateMany` never accept a bare replacement document.
+- **Upsert seeds the new document from the filter**, not from an empty
+  object: `build_upsert_seed` in `db.c` pulls the filter's top-level bare
+  equality conditions (skipping anything under `$and`/`$or`/`$nor` or
+  wrapped in an operator expression — the same conservative scope as the
+  equality-index planner) into a base document, then runs it through
+  `upd_apply` before splicing in the id. This matches real MongoDB's
+  upsert-from-filter behavior, e.g. `updateOne({name:'Ghost'},
+  {$set:{team:'core'}}, {upsert:true})` creates `{name:'Ghost',
+  team:'core', _id:...}`, not just `{team:'core', _id:...}`.
+  `dc_update_one`/`dc_update_many` otherwise mirror `dc_replace_one`'s
+  index-maintenance and (for `_many`) `dc_find`'s planner-aware
+  matched-document gathering exactly.
+- **`updateMany` does not detect no-op updates**: every matched document
+  is written and counted as modified, so `modifiedCount` always mirrors
+  `matchedCount` — no byte-comparison of old vs. new to catch e.g. `$set`
+  to a field's current value (documented simplification, not a hard
+  architectural limit).
+- `dcw_update_many` is the first `dcw_*` function whose result is a
+  *structured* value (`{matchedCount, upserted}`) rather than a single
+  int/double — built as a small binjson object directly in `db_wasm.c`
+  and written through the existing `dcw_out` slot, the same one
+  `dc_find`/`dc_collection_find_by_index` already share.
+- `Collection.replaceOne`'s three-buffer (filter + second-doc + default-id)
+  marshaling was factored out into a shared `_marshalTriple` helper in
+  `src/binjson-wasm.js`, now used by `replaceOne`/`updateOne`/`updateMany`
+  — the third real use is what justified extracting it.
+- `test/db.test.js` — 15 new tests (each operator, combined operators in
+  one call, replacement-document/unknown-operator/`_id`-target/double-
+  target rejection, no-match/no-upsert no-op, upsert seeded from the
+  filter including the operator-expression-fields-excluded case,
+  `updateMany` matching several documents, `updateMany` upsert, and index
+  maintenance on an indexed field change).
+
+All C sources, now including `update.c`, continue to compile and link
+cleanly together natively in addition to the Emscripten/WASM build.
 
 ### Milestone 5 — Transactions — not started
 

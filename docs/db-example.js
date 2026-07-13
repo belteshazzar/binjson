@@ -127,6 +127,23 @@ async function main() {
     console.log('upserted:', upsertedId);
     console.log();
 
+    console.log('=== updateOne / updateMany (update operators) ===');
+    // $set/$unset/$inc/$push/$pull -- a plain replacement document is
+    // rejected here (that's replaceOne's job).
+    await users.updateOne({ name: 'Ada' }, { $inc: { age: 1 }, $push: { tags: 'reviewed' } });
+    console.log('after updateOne:', await users.findOne({ name: 'Ada' }));
+    const many = await users.updateMany({ team: 'core' }, { $set: { onCall: true } });
+    console.log(`updateMany matched/modified ${many.matchedCount}/${many.modifiedCount}`);
+    // upsert seeds the new document from the filter's bare equality
+    // fields, not just from the update operators.
+    const upsertedMany = await users.updateMany(
+      { name: 'Rear Admiral', team: 'core' },
+      { $set: { age: 60 } },
+      { upsert: true }
+    );
+    console.log('updateMany upserted:', await users.findOne({ _id: upsertedMany.upsertedId }));
+    console.log();
+
     console.log('=== deleteOne ===');
     const { deletedCount } = await users.deleteOne({ name: 'Linus' });
     console.log(`Deleted ${deletedCount} document(s)`);

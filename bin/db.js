@@ -36,6 +36,8 @@ Document commands:
   count <coll> [filter]                  Count matching documents
   delete-one <coll> [filter]             Delete the first matching document
   replace-one <coll> <filter> <doc>      Replace the first matching document
+  update-one <coll> <filter> <update>    Apply update operators to the first match
+  update-many <coll> <filter> <update>   Apply update operators to every match
 
 Index commands:
   create-index <coll> <keys>             e.g. create-index users '{"team":1}'
@@ -48,12 +50,16 @@ Index commands:
 (e.g. '{"age":{"$gt":30}}'); ObjectId and Date literals use MongoDB Extended
 JSON: {"$oid":"<24 hex chars>"} and {"$date":"<ISO 8601>"}.
 
+<update> for update-one/update-many is an object of $set/$unset/$inc/$push/
+$pull operators, e.g. '{"$set":{"team":"core"},"$inc":{"visits":1}}'; a
+plain replacement document is rejected -- use replace-one for that.
+
 Options:
   --sort <json>       find: sort spec, e.g. '{"age":1}' or '{"age":-1}'
   --skip <n>          find: number of matches to skip
   --limit <n>         find: max matches to return
   --project <json>    find: projection spec, e.g. '{"name":1}' or '{"age":0}'
-  --upsert            replace-one: insert if nothing matched
+  --upsert            replace-one/update-one/update-many: insert if nothing matched
   --name <name>       create-index: index name (default: "field_1[_field2_1...]")
   --order <n>         B+ tree order for newly created files (default 32, min 3)
   -h, --help          Show this help`);
@@ -281,6 +287,38 @@ async function main() {
         } else {
           console.log('No document matched; nothing replaced.');
           process.exitCode = 1;
+        }
+        break;
+      }
+
+      case 'update-one': {
+        requireArgs(args, 3, 'update-one requires <coll>, <filter>, and <update>');
+        const coll = await db.collection(args[0]);
+        const filter = parseJson('<filter>', args[1]);
+        const update = parseJson('<update>', args[2]);
+        const result = await coll.updateOne(filter, update, { upsert: !!opts.upsert });
+        if (result.upsertedId) {
+          console.log(`Upserted ${formatValue(result.upsertedId)}.`);
+        } else if (result.modifiedCount) {
+          console.log('Updated 1 document.');
+        } else {
+          console.log('No document matched; nothing updated.');
+          process.exitCode = 1;
+        }
+        break;
+      }
+
+      case 'update-many': {
+        requireArgs(args, 3, 'update-many requires <coll>, <filter>, and <update>');
+        const coll = await db.collection(args[0]);
+        const filter = parseJson('<filter>', args[1]);
+        const update = parseJson('<update>', args[2]);
+        const result = await coll.updateMany(filter, update, { upsert: !!opts.upsert });
+        if (result.upsertedId) {
+          console.log(`Upserted ${formatValue(result.upsertedId)}.`);
+        } else {
+          console.log(`Updated ${result.modifiedCount} document(s).`);
+          if (result.modifiedCount === 0) process.exitCode = 1;
         }
         break;
       }

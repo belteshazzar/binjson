@@ -32,6 +32,8 @@ and per index.
 | `count <coll> [filter]` | Count matching documents |
 | `delete-one <coll> [filter]` | Delete the first matching document |
 | `replace-one <coll> <filter> <doc>` | Replace the first matching document |
+| `update-one <coll> <filter> <update>` | Apply update operators to the first matching document |
+| `update-many <coll> <filter> <update>` | Apply update operators to every matching document |
 | `create-index <coll> <keys>` | Create an index, e.g. `'{"team":1}'` |
 | `drop-index <coll> <indexName>` | Drop an index |
 | `list-indexes <coll>` | List a collection's indexes |
@@ -64,6 +66,20 @@ db mydb insert events '{"name":"launch","at":{"$date":"2026-01-01T00:00:00Z"}}'
 A bare hex string does **not** match an `ObjectId` field — same as the real
 MongoDB driver, `_id` and `ObjectId` values are a distinct type from strings.
 
+## Update operators
+
+`<update>` for `update-one`/`update-many` is an object of `$set`/`$unset`/
+`$inc`/`$push`/`$pull` operators — a plain replacement document is rejected,
+use `replace-one` for that:
+
+```sh
+db mydb update-one users '{"name":"Ada"}' '{"$set":{"team":"core"},"$inc":{"visits":1}}'
+db mydb update-many users '{"team":"core"}' '{"$push":{"tags":"reviewed"}}'
+```
+
+See `docs/db-plan.md` (milestone 4) for the exact rules and current
+limitations (top-level fields only, no dotted update paths yet).
+
 ## Options
 
 | Option | Applies to | Description |
@@ -72,7 +88,7 @@ MongoDB driver, `_id` and `ObjectId` values are a distinct type from strings.
 | `--skip <n>` | `find` | Number of matches to skip (after sort) |
 | `--limit <n>` | `find` | Max matches to return (after skip) |
 | `--project <json>` | `find` | Projection, e.g. `'{"name":1}'` or `'{"age":0}'` |
-| `--upsert` | `replace-one` | Insert if nothing matched |
+| `--upsert` | `replace-one`, `update-one`, `update-many` | Insert if nothing matched |
 | `--name <name>` | `create-index` | Index name (default: `field_1[_field2_1...]`) |
 | `--order <n>` | any file-creating command | B+ tree order for new files (default 32, min 3) |
 | `-h`, `--help` | | Show help |
@@ -94,6 +110,7 @@ db mydb create-index users '{"team":1}'
 db mydb find-by-index users team_1 '["core"]'
 
 db mydb replace-one users '{"name":"Ada"}' '{"name":"Ada","team":"core","age":37}'
+db mydb update-one users '{"name":"Ada"}' '{"$inc":{"age":1}}'
 db mydb delete-one users '{"name":"Grace"}'
 db mydb count users
 ```

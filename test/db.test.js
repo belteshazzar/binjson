@@ -597,6 +597,197 @@ describe('db: query engine (milestone 3)', () => {
   });
 });
 
+describe('db: update operators (milestone 4)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  it('$set updates an existing field and creates a new one', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+
+    const result = await users.updateOne({ _id: insertedId }, { $set: { team: 'kernel', age: 36 } });
+    expect(result).toEqual({ acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedId: null });
+    expect(await users.findOne({ _id: insertedId })).toEqual({ _id: insertedId, name: 'Ada', team: 'kernel', age: 36 });
+    await db.close();
+  });
+
+  it('$unset removes a field', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+
+    await users.updateOne({ _id: insertedId }, { $unset: { team: '' } });
+    expect(await users.findOne({ _id: insertedId })).toEqual({ _id: insertedId, name: 'Ada' });
+    // Unsetting a field that isn't there is a harmless no-op.
+    await users.updateOne({ _id: insertedId }, { $unset: { nope: '' } });
+    expect(await users.findOne({ _id: insertedId })).toEqual({ _id: insertedId, name: 'Ada' });
+    await db.close();
+  });
+
+  it('$inc increments an existing field and creates a missing one', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', age: 36 });
+
+    await users.updateOne({ _id: insertedId }, { $inc: { age: 1, visits: 1 } });
+    expect(await users.findOne({ _id: insertedId })).toEqual({ _id: insertedId, name: 'Ada', age: 37, visits: 1 });
+    await users.updateOne({ _id: insertedId }, { $inc: { age: -10.5 } });
+    expect((await users.findOne({ _id: insertedId })).age).toBe(26.5);
+    await db.close();
+  });
+
+  it('$inc rejects a non-numeric existing field', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada' });
+    await expect(users.updateOne({ _id: insertedId }, { $inc: { name: 1 } })).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$push appends to an existing array and creates a new one', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', tags: ['core'] });
+
+    await users.updateOne({ _id: insertedId }, { $push: { tags: 'admin', badges: 'first' } });
+    expect(await users.findOne({ _id: insertedId })).toEqual({
+      _id: insertedId, name: 'Ada', tags: ['core', 'admin'], badges: ['first']
+    });
+    await db.close();
+  });
+
+  it('$push rejects a non-array existing field', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', tags: 'not-an-array' });
+    await expect(users.updateOne({ _id: insertedId }, { $push: { tags: 'x' } })).rejects.toThrow();
+    await db.close();
+  });
+
+  it('$pull removes matching elements and is a no-op on a missing field', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', tags: ['core', 'admin', 'core'] });
+
+    await users.updateOne({ _id: insertedId }, { $pull: { tags: 'core' } });
+    expect((await users.findOne({ _id: insertedId })).tags).toEqual(['admin']);
+
+    await users.updateOne({ _id: insertedId }, { $pull: { missing: 'x' } });
+    expect((await users.findOne({ _id: insertedId })).tags).toEqual(['admin']);
+    await db.close();
+  });
+
+  it('multiple operators apply together in one call', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core', age: 36, tags: ['core'] });
+
+    await users.updateOne(
+      { _id: insertedId },
+      { $set: { team: 'kernel' }, $inc: { age: 1 }, $push: { tags: 'admin' }, $unset: { name: '' } }
+    );
+    expect(await users.findOne({ _id: insertedId })).toEqual({
+      _id: insertedId, team: 'kernel', age: 37, tags: ['core', 'admin']
+    });
+    await db.close();
+  });
+
+  it('rejects a replacement-shaped update (use replaceOne instead)', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada' });
+    await expect(users.updateOne({ _id: insertedId }, { name: 'New name' })).rejects.toThrow();
+    await db.close();
+  });
+
+  it('rejects targeting _id, an unrecognized operator, and a field targeted twice', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', age: 36 });
+    await expect(users.updateOne({ _id: insertedId }, { $set: { _id: new ObjectId() } })).rejects.toThrow();
+    await expect(users.updateOne({ _id: insertedId }, { $mul: { age: 2 } })).rejects.toThrow();
+    await expect(
+      users.updateOne({ _id: insertedId }, { $set: { age: 1 }, $inc: { age: 1 } })
+    ).rejects.toThrow();
+    await db.close();
+  });
+
+  it('updateOne with no match and no upsert is a no-op', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const result = await users.updateOne({ name: 'Ghost' }, { $set: { seen: true } });
+    expect(result).toEqual({ acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null });
+    expect(await users.countDocuments()).toBe(0);
+    await db.close();
+  });
+
+  it('updateOne upsert seeds the new document from the filter\'s bare equality fields', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const result = await users.updateOne(
+      { name: 'Ghost', team: 'core' },
+      { $set: { age: 100 } },
+      { upsert: true }
+    );
+    expect(result.upsertedId).toBeInstanceOf(ObjectId);
+    expect(await users.findOne({ _id: result.upsertedId })).toEqual({
+      _id: result.upsertedId, name: 'Ghost', team: 'core', age: 100
+    });
+    // A filter field wrapped in an operator expression is not a literal
+    // equality condition, so it's not part of the upsert seed.
+    const result2 = await users.updateOne(
+      { name: 'Ghost2', age: { $gt: 5 } },
+      { $set: { team: 'kernel' } },
+      { upsert: true }
+    );
+    expect(await users.findOne({ _id: result2.upsertedId })).toEqual({
+      _id: result2.upsertedId, name: 'Ghost2', team: 'kernel'
+    });
+    await db.close();
+  });
+
+  it('updateMany applies to every matching document', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await users.insertOne({ name: 'Ada', team: 'core' });
+    await users.insertOne({ name: 'Grace', team: 'core' });
+    await users.insertOne({ name: 'Linus', team: 'kernel' });
+
+    const result = await users.updateMany({ team: 'core' }, { $set: { onCall: true } });
+    expect(result).toEqual({ acknowledged: true, matchedCount: 2, modifiedCount: 2, upsertedId: null });
+    expect((await users.find({ onCall: true }).toArray()).map(d => d.name).sort()).toEqual(['Ada', 'Grace']);
+    expect(await users.findOne({ name: 'Linus' })).not.toHaveProperty('onCall');
+    await db.close();
+  });
+
+  it('updateMany with no match and upsert:true inserts exactly one document', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const result = await users.updateMany({ team: 'ghosts' }, { $set: { seen: true } }, { upsert: true });
+    expect(result.matchedCount).toBe(0);
+    expect(result.upsertedId).toBeInstanceOf(ObjectId);
+    expect(await users.countDocuments()).toBe(1);
+    expect(await users.findOne({ _id: result.upsertedId })).toEqual({
+      _id: result.upsertedId, team: 'ghosts', seen: true
+    });
+    await db.close();
+  });
+
+  it('updateOne keeps an attached index in sync when the indexed field changes', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await users.createIndex({ team: 1 });
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+
+    await users.updateOne({ _id: insertedId }, { $set: { team: 'kernel' } });
+    expect(await users.findByIndex('team_1', ['core'])).toEqual([]);
+    expect((await users.findByIndex('team_1', ['kernel'])).map(d => d.name)).toEqual(['Ada']);
+    await db.close();
+  });
+});
+
 const { hasOPFS } = await bootstrapOPFS();
 
 describe.skipIf(!hasOPFS)('db: OPFS storage provider', () => {
