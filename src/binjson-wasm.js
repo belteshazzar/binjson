@@ -2320,6 +2320,40 @@ class Collection {
     return { acknowledged: true, insertedId: _id };
   }
 
+  /**
+   * Insert every document in `docs`. `ordered` (default true) stops at the
+   * first failing document; `false` attempts every document regardless of
+   * earlier failures. Each document's _id is assigned client-side up front
+   * (same convention as insertOne) so the result's insertedIds can be built
+   * directly from ids already known here — dcw_insert_many's out slot only
+   * needs to report success/failure per index (see dc_insert_many).
+   */
+  async insertMany(docs, { ordered = true } = {}) {
+    if (!Array.isArray(docs) || docs.length === 0) {
+      throw new Error('insertMany requires a non-empty array of documents');
+    }
+    const M = requireModule();
+    const ids = docs.map(doc => doc._id !== undefined ? toObjectId(doc._id) : new ObjectId());
+    const bytes = encode(docs.map((doc, i) => ({ ...doc, _id: ids[i] })));
+    const rc = withBytes(M, bytes, (p, n) => M._dcw_insert_many(this._outCtx, this._collCtx, p, n, ordered ? 1 : 0));
+    if (rc !== 0) throw codeError(rc, 'insertMany');
+
+    const results = this._readOut(M); // one error code per attempted document
+    const insertedIds = {};
+    let insertedCount = 0;
+    for (let i = 0; i < results.length; i++) {
+      if (results[i] === 0) {
+        insertedIds[i] = ids[i];
+        insertedCount++;
+      } else {
+        const err = codeError(results[i], `insertMany (document ${i})`);
+        err.result = { acknowledged: true, insertedCount, insertedIds };
+        throw err;
+      }
+    }
+    return { acknowledged: true, insertedCount, insertedIds };
+  }
+
   async findOne(filter = {}) {
     const M = requireModule();
     const fbytes = encode(filter);
@@ -2392,6 +2426,25 @@ class Collection {
     return { acknowledged: true, deletedCount: rc };
   }
 
+  /** Delete every document matching `filter`. */
+  async deleteMany(filter = {}) {
+    const M = requireModule();
+    const fbytes = encode(filter);
+    const n = withBytes(M, fbytes, (p, len) => M._dcw_delete_many(this._collCtx, p, len));
+    if (n < 0) throw codeError(n, 'deleteMany');
+    return { acknowledged: true, deletedCount: n };
+  }
+
+  /** Atomically find the first document matching `filter` and delete it,
+   * returning the deleted document (or null if nothing matched). */
+  async findOneAndDelete(filter = {}) {
+    const M = requireModule();
+    const fbytes = encode(filter);
+    const found = withBytes(M, fbytes, (p, n) => M._dcw_find_one_and_delete(this._outCtx, this._collCtx, p, n));
+    if (found < 0) throw codeError(found, 'findOneAndDelete');
+    return found ? this._readOut(M) : null;
+  }
+
   /**
    * Malloc `a`/`b` (encoded) plus a fresh ObjectId's 12 bytes, call
    * fn(M, aPtr, aLen, bPtr, bLen, idPtr), free everything, and return
@@ -2440,6 +2493,24 @@ class Collection {
   }
 
   /**
+   * Atomically find the first document matching `filter` and replace it,
+   * returning the pre-image (`returnDocument: 'before'`, the default) or
+   * the post-image (`'after'`) — or null if nothing matched and no upsert
+   * happened (or `returnDocument: 'before'` with an upsert: no prior state
+   * to return, matching real MongoDB).
+   */
+  async findOneAndReplace(filter, replacement, { upsert = false, returnDocument = 'before' } = {}) {
+    if (replacement === null || typeof replacement !== 'object' || Array.isArray(replacement)) {
+      throw new Error('findOneAndReplace requires a replacement document object');
+    }
+    const returnNew = returnDocument === 'after';
+    const { rc } = this._marshalTriple(filter, replacement, (M, fp, fn, rp, rn, dp) =>
+      M._dcw_find_one_and_replace(this._outCtx, this._collCtx, fp, fn, rp, rn, dp, upsert ? 1 : 0, returnNew ? 1 : 0));
+    if (rc < 0) throw codeError(rc, 'findOneAndReplace');
+    return rc ? this._readOut(requireModule()) : null;
+  }
+
+  /**
    * Apply update operators ($set/$unset/$inc/$push/$pull — see
    * c/db_update.h for the exact rules) to the first document matching
    * `filter`. `update`'s top level must be entirely $-prefixed operators;
@@ -2456,6 +2527,23 @@ class Collection {
     if (rc === 0) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: null };
     if (rc === 2) return { acknowledged: true, matchedCount: 0, modifiedCount: 0, upsertedId: defaultId };
     return { acknowledged: true, matchedCount: 1, modifiedCount: 1, upsertedId: null };
+  }
+
+  /**
+   * Atomically find the first document matching `filter` and apply
+   * `update` to it, returning the pre-image (`returnDocument: 'before'`,
+   * the default) or the post-image (`'after'`) — or null, following
+   * findOneAndReplace's exact convention for "nothing to return".
+   */
+  async findOneAndUpdate(filter, update, { upsert = false, returnDocument = 'before' } = {}) {
+    if (update === null || typeof update !== 'object' || Array.isArray(update)) {
+      throw new Error('findOneAndUpdate requires an update document object');
+    }
+    const returnNew = returnDocument === 'after';
+    const { rc } = this._marshalTriple(filter, update, (M, fp, fn, up, un, dp) =>
+      M._dcw_find_one_and_update(this._outCtx, this._collCtx, fp, fn, up, un, dp, upsert ? 1 : 0, returnNew ? 1 : 0));
+    if (rc < 0) throw codeError(rc, 'findOneAndUpdate');
+    return rc ? this._readOut(requireModule()) : null;
   }
 
   /**
@@ -2486,6 +2574,105 @@ class Collection {
     const n = withBytes(M, fbytes, (p, len) => M._dcw_count(this._collCtx, p, len));
     if (n < 0) throw codeError(n, 'countDocuments');
     return n;
+  }
+
+  /** Real MongoDB's estimatedDocumentCount() is a metadata-based estimate
+   * vs. countDocuments()'s exact scan; here {} is already an O(1)
+   * bpt_size lookup on both, so this is a plain alias. */
+  async estimatedDocumentCount() {
+    return this.countDocuments({});
+  }
+
+  /** Unique values of `field` (dot-separated path) across every document
+   * matching `filter`. */
+  async distinct(field, filter = {}) {
+    const M = requireModule();
+    const f = allocStr(M, field);
+    const fbytes = encode(filter);
+    const fp = fbytes.length ? M._malloc(fbytes.length) : 0;
+    if (fbytes.length) M.HEAPU8.set(fbytes, fp);
+    let rc;
+    try {
+      rc = M._dcw_distinct(this._outCtx, this._collCtx, f.ptr, f.len, fp, fbytes.length);
+    } finally {
+      f.free();
+      if (fp) M._free(fp);
+    }
+    if (rc !== 0) throw codeError(rc, 'distinct');
+    return this._readOut(M) ?? [];
+  }
+
+  /**
+   * Mixed-operation bulk write: each element of `operations` is exactly one
+   * of {insertOne, updateOne, updateMany, replaceOne, deleteOne,
+   * deleteMany}, shaped like the real driver's bulkWrite(). Pure JS
+   * orchestration over the already-atomic Collection methods above — no
+   * new C logic needed, since each sub-operation is already a complete,
+   * atomic unit on its own (same reasoning as updateMany's per-document
+   * journal commits). `ordered` (default true) stops at the first failing
+   * operation; `false` attempts every operation and throws an aggregate
+   * error afterward if any failed.
+   */
+  async bulkWrite(operations, { ordered = true } = {}) {
+    if (!Array.isArray(operations) || operations.length === 0) {
+      throw new Error('bulkWrite requires a non-empty array of operations');
+    }
+    const result = {
+      acknowledged: true, insertedCount: 0, matchedCount: 0, modifiedCount: 0,
+      deletedCount: 0, upsertedCount: 0, insertedIds: {}, upsertedIds: {}
+    };
+    const errors = [];
+    for (let i = 0; i < operations.length; i++) {
+      const op = operations[i];
+      const type = Object.keys(op)[0];
+      const spec = op[type];
+      try {
+        switch (type) {
+          case 'insertOne': {
+            const { insertedId } = await this.insertOne(spec.document);
+            result.insertedIds[i] = insertedId;
+            result.insertedCount++;
+            break;
+          }
+          case 'updateOne':
+          case 'updateMany':
+          case 'replaceOne': {
+            const method = type === 'replaceOne' ? spec.replacement : spec.update;
+            const r = type === 'updateOne' ? await this.updateOne(spec.filter, method, { upsert: spec.upsert })
+              : type === 'updateMany' ? await this.updateMany(spec.filter, method, { upsert: spec.upsert })
+              : await this.replaceOne(spec.filter, method, { upsert: spec.upsert });
+            result.matchedCount += r.matchedCount;
+            result.modifiedCount += r.modifiedCount;
+            if (r.upsertedId) { result.upsertedIds[i] = r.upsertedId; result.upsertedCount++; }
+            break;
+          }
+          case 'deleteOne': {
+            const r = await this.deleteOne(spec.filter);
+            result.deletedCount += r.deletedCount;
+            break;
+          }
+          case 'deleteMany': {
+            const r = await this.deleteMany(spec.filter);
+            result.deletedCount += r.deletedCount;
+            break;
+          }
+          default:
+            throw new Error(`bulkWrite: unknown operation type "${type}"`);
+        }
+      } catch (err) {
+        errors.push({ index: i, error: err });
+        if (ordered) break;
+      }
+    }
+    if (errors.length > 0) {
+      const err = new Error(
+        `bulkWrite: ${errors.length} operation(s) failed (first at index ${errors[0].index}: ${errors[0].error.message})`
+      );
+      err.result = result;
+      err.writeErrors = errors;
+      throw err;
+    }
+    return result;
   }
 }
 

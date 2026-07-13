@@ -423,6 +423,156 @@ single chunk of net-new logic in the plan, and nothing else depends on it.
 Deliberately deprioritized rather than merely deferred; revisit only if a
 concrete use case needs it.
 
+### Milestone 8 — CRUD completeness — ✅ COMPLETE
+
+`insertMany`, `deleteMany`, `findOneAndUpdate`/`findOneAndReplace`/
+`findOneAndDelete`, `distinct`, `bulkWrite`, and `estimatedDocumentCount` —
+the most commonly hit gaps against the real `mongodb` driver's CRUD
+surface. Every one composes existing primitives; no new query/index logic
+was needed.
+
+- **Consolidation done first**: `dc_find`, `dc_update_many`, and (still)
+  `dc_count` each independently implemented the same "resolve source
+  ($text/$near/$geoWithin → equality-index plan → full scan), then filter-
+  match, collect matches" branching. Extracted into a shared static
+  `gather_matches` (`c/db.c`) that `dc_find`/`dc_update_many` now call,
+  and that `dc_delete_many`/`dc_distinct` (both new) also use — would
+  otherwise have been the 5th/6th copy. `dc_count` deliberately keeps its
+  own lean count-only scan (materializing every match just to count them
+  would regress a large unfiltered count from O(1) to O(n) in memory).
+  Similarly, `db_query.c`'s dotted-path field resolver and its
+  `val_list`/`val_span`/`value_eq` (growable byte-span list + byte
+  equality, built for array-element candidate matching) are now exposed
+  from `db_query.h` as `qry_resolve_path`/`val_list_push`/`val_list_free`/
+  `value_eq`, reused by `dc_distinct` instead of reimplementing dedup.
+- **`dc_insert_many`**: loops `dc_insert_one` over a documents ARRAY,
+  writing one INT result code per attempted document (`BJ_OK` or an error)
+  through the out slot; stops early when `ordered`. `insertedIds` stays a
+  client-side concern like every other id — JS already generated each
+  document's `_id` before the call, so the C side only reports success/
+  failure per index.
+- **`dc_delete_many`**: `gather_matches` then, per match, the same
+  remove-from-indexes/`bpt_delete`/`commit_journal` sequence
+  `dc_update_many` already established — one journal commit per deleted
+  document, matching milestone 5's per-document granularity.
+- **`dc_find_one_and_update`/`_replace`/`_delete`**: composed in C (not
+  JS), consistent with this repo's existing "find X then act on X stays
+  in C" precedent (`dc_replace_one`'s own upsert branch). Each captures
+  the pre-image via `dc_find_one`, then re-targets the *exact* matched
+  document by a new `build_id_filter({_id: <oid>})` helper before calling
+  the existing `dc_update_one`/`dc_replace_one`/`dc_delete_one` — so a
+  second internal find/update/delete can never land on a different
+  document than the one already captured. `return_new` (JS:
+  `returnDocument: 'before' | 'after'`) re-fetches by id for the post-
+  image. `*found` is 0 only when there's truly nothing to return —
+  including the real-MongoDB-matching case of `returnDocument: 'before'`
+  with an upsert that had no prior match (no "before" state exists).
+- **`dc_distinct`**: `gather_matches`, then per match `qry_resolve_path` +
+  a `val_list`-backed dedup by exact encoded-byte equality (same rationale
+  as every other equality in this codebase). An array field's *elements*
+  are the candidates, not the array itself, matching real MongoDB's
+  `distinct()`; documents missing the field contribute nothing (no
+  synthetic `null`).
+- **`bulkWrite`/`estimatedDocumentCount` are pure JS**, no new C: each
+  `bulkWrite` sub-operation dispatches to the already-atomic `Collection`
+  method (same reasoning milestone 5 used for `updateMany`'s per-document
+  journal granularity — sequencing already-complete atomic units in JS
+  doesn't weaken atomicity), aggregating driver-shaped counts and
+  supporting `ordered` (stop at first failure, partial result on the
+  thrown error's `.result`) or unordered (attempt all, `.writeErrors`
+  lists every failure). `estimatedDocumentCount` aliases
+  `countDocuments({})`, since that's already `bpt_size` — O(1) on both.
+- `Collection` in `src/binjson-wasm.js` gained all six methods; six new
+  `dcw_*` WASM exports (`c/db_wasm.c`, `c/build-wasm.sh`) mirror the
+  existing one-export-per-operation convention exactly (`dcw_insert_many`,
+  `dcw_delete_many`, `dcw_find_one_and_update`/`_replace`/`_delete`,
+  `dcw_distinct`).
+- `test/db.test.js` — 22 new tests (insertMany ordered/unordered/generated-
+  vs-supplied-ids/empty-array-rejected; deleteMany with index maintenance;
+  findOneAndUpdate/findOneAndReplace before/after/no-match/upsert-before-
+  vs-after; findOneAndDelete; distinct including dotted-path/missing-field/
+  array-flattening/filtered; estimatedDocumentCount; bulkWrite mixed-
+  operations/ordered/unordered/empty-rejected).
+
+### Milestone 9 — Index options: unique, sparse, partial, TTL — not started
+
+`createIndex({..}, {unique: true})` is explicitly rejected today
+(`src/binjson-wasm.js`'s `createIndex`, `docs/db-plan.md` milestone 2).
+Needed: `unique` (reject an insert/update whose composite key already
+exists in the index — `db_keyenc.h`'s composite key already includes the id
+suffix specifically to allow duplicates, so a unique index needs its own
+key variant or a pre-insert existence check), `sparse` (skip, don't error,
+documents missing the field — today's equality-index backfill is
+all-or-nothing on a missing field, milestone 2), `partialFilterExpression`
+(only index documents matching a filter, reusing `db_query.h`'s matcher),
+and TTL (`expireAfterSeconds` — a background sweep deleting expired
+documents, needing a host-driven timer since there's no OPFS-level cron).
+Also: `createIndex` only accepts ascending (`1`) fields today
+(`checkIndexKeySpec`) — descending fields would mainly help
+`plan_equality_index`/scan direction, not correctness, so lower priority
+within this milestone. Priority: high for `unique` specifically (the most
+commonly needed constraint in real schemas), lower for sparse/partial/TTL.
+
+### Milestone 10 — Update operator completeness — not started
+
+`db_update.h` implements `$set`/`$unset`/`$inc`/`$push`/`$pull` only, all
+top-level-field-only. Gaps, roughly in order of how often real code uses
+them: `$addToSet` (like `$push` but only if absent — needs an equality
+scan of the array, same byte-equality primitive `$pull` already uses),
+`$min`/`$max`/`$mul`/`$rename`/`$currentDate` (each a small, self-contained
+addition alongside `$inc` in `db_update.c`), `$setOnInsert` (only applied
+on the upsert-insert path — `build_upsert_seed`/`upd_apply`'s callers in
+`dc_update_one`/`dc_update_many` already distinguish insert-vs-match, so
+this is mostly plumbing), `$pop`/`$pullAll`/`$bit` (smaller, less common).
+**Dotted-path targets** (`{$set: {"a.b": 1}}`, rejected today) and
+**positional array operators** (`$`, `$[]`, `$[<identifier>]` — target one
+array element) are a materially bigger chunk (auto-vivifying intermediate
+objects, array-element addressing) and worth splitting into their own
+follow-up milestone rather than bundling with the simpler operators above.
+`$push`'s `$each`/`$slice`/`$sort`/`$position` modifiers and `$pull`'s
+query-operator-condition support (`{$pull: {scores: {$lt: 5}}}`, vs.
+today's byte-equality-only) reuse `db_query.h`'s matcher for the condition
+case, similar in shape to milestone 3's planner reuse.
+
+### Milestone 11 — Query operator completeness — not started
+
+`db_query.h` implements the comparison/logical family plus `$exists`/`$not`
+and (milestone 6) `$text`/`$near`/`$geoWithin`; an unrecognized operator is
+a hard error (never a silent no-op), so every gap below is a clean,
+discoverable addition rather than a behavior change. Missing, roughly by
+real-world frequency: `$regex` (needs a regex engine — the biggest single
+piece of new code in this milestone, unlike everything else here), `$size`
+(array length — cheap), `$all` (array superset match — cheap, reuses
+`$in`'s element-wise shape), `$elemMatch` (element-wide-AND over one array
+element, vs. today's per-operator any-element matching — a real semantic
+addition, not just a new operator), `$type`, `$mod`. Lower priority /
+larger, likely follow-on items: MongoDB's null-matches-missing quirk and
+full cross-BSON-type ordering (`db_query.h`'s top comment already documents
+both as deliberately out of scope for the comparison operators) — closing
+either changes existing matching semantics, not just adding new operators,
+so should land as its own reviewed change.
+
+### Milestone 12 — Full multi-document transactions (sessions) — not doing (for now)
+
+Milestone 5 deliberately scoped "transactions" down to per-document-write
+atomicity (`docs/db-transactions` design in milestone 5's own writeup) —
+explicitly not MongoDB's `startSession()`/`withTransaction()`/multi-
+collection ACID surface. Real session support would need a journal that
+spans *multiple* `dc_collection`s at once (today's journal is one per
+collection) plus a JS-level session object buffering operations until
+commit. Substantial new design, not just an extension of milestone 5's
+journal. Deprioritized like milestone 7 (aggregation) — revisit only if a
+concrete multi-collection-atomicity use case shows up.
+
+### Not planned: change streams (`watch()`)
+
+Real MongoDB's change streams tail the replication oplog, which has no
+analog in a single-process embedded store. A reinterpreted local version
+(an in-process `EventEmitter`-style hook firing after each committed write,
+no resume tokens/durability across restarts) would be cheap to add
+whenever a concrete need appears, but is a different feature from the real
+API, not a gap in it — not tracked as a milestone.
+
 ## Open decisions / risks not yet addressed
 
 - **API target — confirmed, not a risk:** JS API matching the `mongodb`

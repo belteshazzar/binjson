@@ -1082,6 +1082,294 @@ describe('db: cross-file write atomicity (milestone 5)', () => {
   });
 });
 
+describe('db: CRUD completeness (milestone 8)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  describe('insertMany', () => {
+    it('inserts every document and assigns/keeps _id', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const suppliedId = new ObjectId();
+      const result = await users.insertMany([{ name: 'Ada' }, { _id: suppliedId, name: 'Grace' }]);
+      expect(result.acknowledged).toBe(true);
+      expect(result.insertedCount).toBe(2);
+      expect(result.insertedIds[1].equals(suppliedId)).toBe(true);
+      const all = await users.find({}).toArray();
+      expect(all.map(d => d.name).sort()).toEqual(['Ada', 'Grace']);
+      await db.close();
+    });
+
+    it('ordered (default) stops at the first failing document', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const dupId = new ObjectId();
+      await users.insertOne({ _id: dupId, name: 'Existing' });
+
+      const err = await users.insertMany([
+        { name: 'Ada' },
+        { _id: dupId, name: 'Duplicate' }, // fails: _id already exists
+        { name: 'Never attempted' }
+      ]).catch(e => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.result.insertedCount).toBe(1);
+      expect(await users.countDocuments({})).toBe(2); // Existing + Ada, not the third
+      await db.close();
+    });
+
+    it('unordered attempts every document despite an earlier failure', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const dupId = new ObjectId();
+      await users.insertOne({ _id: dupId, name: 'Existing' });
+
+      const err = await users.insertMany([
+        { _id: dupId, name: 'Duplicate' },
+        { name: 'Still inserted' }
+      ], { ordered: false }).catch(e => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(await users.findOne({ name: 'Still inserted' })).not.toBeNull();
+      await db.close();
+    });
+
+    it('rejects an empty array', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await expect(users.insertMany([])).rejects.toThrow();
+      await db.close();
+    });
+  });
+
+  describe('deleteMany', () => {
+    it('deletes every matching document and maintains indexes', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ team: 1 });
+      await users.insertMany([
+        { name: 'Ada', team: 'core' }, { name: 'Grace', team: 'core' }, { name: 'Kay', team: 'infra' }
+      ]);
+
+      const result = await users.deleteMany({ team: 'core' });
+      expect(result).toEqual({ acknowledged: true, deletedCount: 2 });
+      expect(await users.countDocuments({})).toBe(1);
+      expect(await users.findByIndex('team_1', ['core'])).toEqual([]);
+      expect((await users.findByIndex('team_1', ['infra'])).map(d => d.name)).toEqual(['Kay']);
+      await db.close();
+    });
+  });
+
+  describe('findOneAndUpdate / findOneAndReplace', () => {
+    it('findOneAndUpdate returns the pre-image by default', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+
+      const doc = await users.findOneAndUpdate({ _id: insertedId }, { $set: { team: 'infra' } });
+      expect(doc).toEqual({ _id: insertedId, name: 'Ada', team: 'core' });
+      expect((await users.findOne({ _id: insertedId })).team).toBe('infra');
+      await db.close();
+    });
+
+    it('findOneAndUpdate returns the post-image with returnDocument: "after"', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+
+      const doc = await users.findOneAndUpdate(
+        { _id: insertedId }, { $set: { team: 'infra' } }, { returnDocument: 'after' }
+      );
+      expect(doc).toEqual({ _id: insertedId, name: 'Ada', team: 'infra' });
+      await db.close();
+    });
+
+    it('findOneAndUpdate returns null when nothing matches and no upsert', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      expect(await users.findOneAndUpdate({ name: 'Nobody' }, { $set: { x: 1 } })).toBeNull();
+      await db.close();
+    });
+
+    it('findOneAndUpdate with upsert: "before" returns null, "after" returns the new document', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+
+      const before = await users.findOneAndUpdate(
+        { name: 'Ghost' }, { $set: { team: 'core' } }, { upsert: true }
+      );
+      expect(before).toBeNull();
+      expect(await users.countDocuments({})).toBe(1);
+
+      const after = await users.findOneAndUpdate(
+        { name: 'Ghost2' }, { $set: { team: 'core' } }, { upsert: true, returnDocument: 'after' }
+      );
+      expect(after.name).toBe('Ghost2');
+      expect(after.team).toBe('core');
+      await db.close();
+    });
+
+    it('findOneAndReplace returns the pre-image and maintains indexes', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.createIndex({ team: 1 });
+      const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+
+      const doc = await users.findOneAndReplace({ _id: insertedId }, { name: 'Ada', team: 'infra' });
+      expect(doc).toEqual({ _id: insertedId, name: 'Ada', team: 'core' });
+      expect((await users.findByIndex('team_1', ['infra'])).map(d => d.name)).toEqual(['Ada']);
+      expect(await users.findByIndex('team_1', ['core'])).toEqual([]);
+      await db.close();
+    });
+
+    it('findOneAndReplace returns the post-image with returnDocument: "after"', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+
+      const doc = await users.findOneAndReplace(
+        { _id: insertedId }, { name: 'Ada', team: 'infra' }, { returnDocument: 'after' }
+      );
+      expect(doc).toEqual({ _id: insertedId, name: 'Ada', team: 'infra' });
+      await db.close();
+    });
+  });
+
+  describe('findOneAndDelete', () => {
+    it('deletes and returns the matched document', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const { insertedId } = await users.insertOne({ name: 'Ada' });
+
+      const doc = await users.findOneAndDelete({ _id: insertedId });
+      expect(doc).toEqual({ _id: insertedId, name: 'Ada' });
+      expect(await users.findOne({ _id: insertedId })).toBeNull();
+      await db.close();
+    });
+
+    it('returns null when nothing matches', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      expect(await users.findOneAndDelete({ name: 'Nobody' })).toBeNull();
+      await db.close();
+    });
+  });
+
+  describe('distinct', () => {
+    it('returns unique values, skipping documents missing the field', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([
+        { name: 'Ada', team: 'core' }, { name: 'Grace', team: 'core' },
+        { name: 'Kay', team: 'infra' }, { name: 'NoTeam' }
+      ]);
+      const teams = await users.distinct('team');
+      expect(teams.sort()).toEqual(['core', 'infra']);
+      await db.close();
+    });
+
+    it('resolves a dotted path', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([
+        { name: 'Ada', address: { city: 'London' } },
+        { name: 'Grace', address: { city: 'Paris' } },
+        { name: 'Kay', address: { city: 'London' } }
+      ]);
+      expect((await users.distinct('address.city')).sort()).toEqual(['London', 'Paris']);
+      await db.close();
+    });
+
+    it('flattens array field values instead of returning the whole array', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([{ name: 'Ada', tags: ['core', 'admin'] }, { name: 'Grace', tags: ['admin'] }]);
+      expect((await users.distinct('tags')).sort()).toEqual(['admin', 'core']);
+      await db.close();
+    });
+
+    it('honors a filter', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([
+        { name: 'Ada', team: 'core' }, { name: 'Grace', team: 'infra' }
+      ]);
+      expect(await users.distinct('team', { name: 'Ada' })).toEqual(['core']);
+      await db.close();
+    });
+  });
+
+  describe('estimatedDocumentCount', () => {
+    it('matches countDocuments({})', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([{ name: 'Ada' }, { name: 'Grace' }]);
+      expect(await users.estimatedDocumentCount()).toBe(2);
+      await db.close();
+    });
+  });
+
+  describe('bulkWrite', () => {
+    it('applies mixed operation types and aggregates counts', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core' });
+      await users.insertOne({ name: 'ToDelete' });
+
+      const result = await users.bulkWrite([
+        { insertOne: { document: { name: 'Grace', team: 'core' } } },
+        { updateOne: { filter: { _id: insertedId }, update: { $set: { team: 'infra' } } } },
+        { deleteOne: { filter: { name: 'ToDelete' } } }
+      ]);
+      expect(result.insertedCount).toBe(1);
+      expect(result.matchedCount).toBe(1);
+      expect(result.modifiedCount).toBe(1);
+      expect(result.deletedCount).toBe(1);
+      expect((await users.findOne({ _id: insertedId })).team).toBe('infra');
+      expect(await users.findOne({ name: 'ToDelete' })).toBeNull();
+      expect(await users.findOne({ name: 'Grace' })).not.toBeNull();
+      await db.close();
+    });
+
+    it('ordered (default) stops at the first failing operation', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const dupId = new ObjectId();
+      await users.insertOne({ _id: dupId, name: 'Existing' });
+
+      const err = await users.bulkWrite([
+        { insertOne: { document: { _id: dupId, name: 'Duplicate' } } },
+        { insertOne: { document: { name: 'Never attempted' } } }
+      ]).catch(e => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(await users.findOne({ name: 'Never attempted' })).toBeNull();
+      await db.close();
+    });
+
+    it('unordered attempts every operation despite an earlier failure', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      const dupId = new ObjectId();
+      await users.insertOne({ _id: dupId, name: 'Existing' });
+
+      const err = await users.bulkWrite([
+        { insertOne: { document: { _id: dupId, name: 'Duplicate' } } },
+        { insertOne: { document: { name: 'Still inserted' } } }
+      ], { ordered: false }).catch(e => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.writeErrors).toHaveLength(1);
+      expect(await users.findOne({ name: 'Still inserted' })).not.toBeNull();
+      await db.close();
+    });
+
+    it('rejects an empty operations array', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await expect(users.bulkWrite([])).rejects.toThrow();
+      await db.close();
+    });
+  });
+});
+
 const { hasOPFS } = await bootstrapOPFS();
 
 describe.skipIf(!hasOPFS)('db: OPFS storage provider', () => {
