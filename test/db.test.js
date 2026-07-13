@@ -398,6 +398,205 @@ describe('db: secondary indexes (milestone 2)', () => {
   });
 });
 
+describe('db: query engine (milestone 3)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  async function seedPeople(users) {
+    await users.insertOne({ name: 'Ada', team: 'core', age: 36, tags: ['admin', 'core'] });
+    await users.insertOne({ name: 'Grace', team: 'core', age: 85, tags: ['core'] });
+    await users.insertOne({ name: 'Linus', team: 'kernel', age: 54, tags: ['kernel', 'admin'] });
+    await users.insertOne({ name: 'Margaret', team: 'kernel', age: 45 }); // no tags field
+  }
+
+  it('comparison operators: $gt/$gte/$lt/$lte/$ne', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    expect((await users.find({ age: { $gt: 50 } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Grace', 'Linus']);
+    expect((await users.find({ age: { $gte: 54 } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Grace', 'Linus']);
+    expect((await users.find({ age: { $lt: 45 } }).toArray()).map(d => d.name)).toEqual(['Ada']);
+    expect((await users.find({ age: { $lte: 45 } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Margaret']);
+    expect((await users.find({ team: { $ne: 'core' } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Linus', 'Margaret']);
+    // Multiple operators on one field are ANDed.
+    expect((await users.find({ age: { $gte: 40, $lt: 60 } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Linus', 'Margaret']);
+    await db.close();
+  });
+
+  it('$in / $nin', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    expect((await users.find({ team: { $in: ['core'] } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Grace']);
+    expect((await users.find({ team: { $nin: ['core'] } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Linus', 'Margaret']);
+    await db.close();
+  });
+
+  it('$exists', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    expect((await users.find({ tags: { $exists: true } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Grace', 'Linus']);
+    expect((await users.find({ tags: { $exists: false } }).toArray()).map(d => d.name))
+      .toEqual(['Margaret']);
+    await db.close();
+  });
+
+  it('array fields match by element or by whole-array value', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    // Element match.
+    expect((await users.find({ tags: 'admin' }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Linus']);
+    expect((await users.find({ tags: { $in: ['kernel'] } }).toArray()).map(d => d.name))
+      .toEqual(['Linus']);
+    // Whole-array equality still works.
+    expect((await users.find({ tags: ['core'] }).toArray()).map(d => d.name)).toEqual(['Grace']);
+    await db.close();
+  });
+
+  it('$and / $or / $nor', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    expect((await users.find({ $and: [{ team: 'core' }, { age: { $gt: 50 } }] }).toArray()).map(d => d.name))
+      .toEqual(['Grace']);
+    expect((await users.find({ $or: [{ team: 'kernel' }, { age: { $lt: 40 } }] }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Linus', 'Margaret']);
+    expect((await users.find({ $nor: [{ team: 'kernel' }, { age: { $lt: 40 } }] }).toArray()).map(d => d.name))
+      .toEqual(['Grace']);
+    await db.close();
+  });
+
+  it('$not negates an operator expression', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    expect((await users.find({ age: { $not: { $gt: 50 } } }).toArray()).map(d => d.name).sort())
+      .toEqual(['Ada', 'Margaret']);
+    await db.close();
+  });
+
+  it('dot-notation resolves nested fields', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await users.insertOne({ name: 'Ada', address: { city: 'London', zip: 'W1' } });
+    await users.insertOne({ name: 'Grace', address: { city: 'Arlington' } });
+
+    expect((await users.find({ 'address.city': 'London' }).toArray()).map(d => d.name)).toEqual(['Ada']);
+    expect(await users.find({ 'address.zip': { $exists: true } }).toArray()).toHaveLength(1);
+    await db.close();
+  });
+
+  it('rejects an unrecognized query operator instead of silently matching everything', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+    await expect(users.find({ name: { $regex: '^A' } }).toArray()).rejects.toThrow();
+    await db.close();
+  });
+
+  it('sort ascending and descending, including a compound sort', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    expect((await users.find({}, { sort: { age: 1 } }).toArray()).map(d => d.name))
+      .toEqual(['Ada', 'Margaret', 'Linus', 'Grace']);
+    expect((await users.find({}).sort({ age: -1 }).toArray()).map(d => d.name))
+      .toEqual(['Grace', 'Linus', 'Margaret', 'Ada']);
+    expect((await users.find({}).sort({ team: 1, age: 1 }).toArray()).map(d => d.name))
+      .toEqual(['Ada', 'Grace', 'Margaret', 'Linus']);
+    await db.close();
+  });
+
+  it('skip and limit apply after sort', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    const page = await users.find({}).sort({ age: 1 }).skip(1).limit(2).toArray();
+    expect(page.map(d => d.name)).toEqual(['Margaret', 'Linus']);
+    await db.close();
+  });
+
+  it('projection includes or excludes fields, with _id defaulting to included', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core', age: 36 });
+
+    const included = await users.find({ _id: insertedId }).project({ name: 1 }).toArray();
+    expect(included).toEqual([{ _id: insertedId, name: 'Ada' }]);
+
+    const excluded = await users.find({ _id: insertedId }).project({ age: 0 }).toArray();
+    expect(excluded).toEqual([{ _id: insertedId, name: 'Ada', team: 'core' }]);
+
+    const noId = await users.find({ _id: insertedId }).project({ name: 1, _id: 0 }).toArray();
+    expect(noId).toEqual([{ name: 'Ada' }]);
+    await db.close();
+  });
+
+  it('findOne/deleteOne/replaceOne/countDocuments also use the operator-aware matcher', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await seedPeople(users);
+
+    expect((await users.findOne({ age: { $gt: 80 } })).name).toBe('Grace');
+    expect(await users.countDocuments({ age: { $gte: 45 } })).toBe(3);
+    expect((await users.deleteOne({ age: { $gt: 80 } })).deletedCount).toBe(1);
+    expect(await users.countDocuments()).toBe(3);
+    const r = await users.replaceOne({ age: { $lt: 40 } }, { name: 'Ada', team: 'core', age: 37 });
+    expect(r.matchedCount).toBe(1);
+    expect((await users.findOne({ name: 'Ada' })).age).toBe(37);
+    await db.close();
+  });
+
+  it('an equality-index plan and a full scan agree on results (with sort/skip/limit/projection)', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await users.createIndex({ team: 1 });
+    await seedPeople(users);
+    // A fifth document sharing team 'core' so the plan has more than one
+    // candidate to sift through with the (non-indexed) age filter below.
+    await users.insertOne({ name: 'Katherine', team: 'core', age: 28, tags: ['core'] });
+
+    // Planned: filter pins the whole index (team) via bare equality.
+    const planned = await users.find({ team: 'core' }).sort({ age: 1 }).toArray();
+    expect(planned.map(d => d.name)).toEqual(['Katherine', 'Ada', 'Grace']);
+
+    // Planned index lookup, but the filter also carries a non-indexed
+    // condition -- must still be honored (full filter re-applied).
+    const plannedPlusExtra = await users.find({ team: 'core', age: { $gt: 30 } }).toArray();
+    expect(plannedPlusExtra.map(d => d.name).sort()).toEqual(['Ada', 'Grace']);
+
+    // Not planned (range condition, not equality) -- must still be correct.
+    const scanned = await users.find({ team: 'core', age: { $gte: 0 } }).sort({ age: 1 }).toArray();
+    expect(scanned.map(d => d.name)).toEqual(['Katherine', 'Ada', 'Grace']);
+
+    // Not planned ($or at the top level) -- must still be correct.
+    const orred = await users.find({ $or: [{ team: 'core' }, { name: 'Linus' }] }).toArray();
+    expect(orred.map(d => d.name).sort()).toEqual(['Ada', 'Grace', 'Katherine', 'Linus']);
+
+    await db.close();
+  });
+});
+
 const { hasOPFS } = await bootstrapOPFS();
 
 describe.skipIf(!hasOPFS)('db: OPFS storage provider', () => {

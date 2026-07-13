@@ -1852,14 +1852,19 @@ function applyDelta(source, delta) {
 // ---------------------------------------------------------------------------
 // Db / Collection — a MongoDB-driver-shaped document database.
 //
-// A collection is a bpt keyed by the raw 12-byte ObjectId (see db.h), with
-// insert/find/delete/replace/count and filter matching implemented in C
-// (db.c/db_wasm.c) — this layer only marshals bytes across the WASM bridge,
-// the same way BPlusTree/RTree/TextIndex above do. A database is a root
-// catalog tree (collection name -> backing file name) plus a storage
+// A collection is a bpt keyed by the raw 12-byte ObjectId, plus zero or more
+// attached secondary indexes (see db.h). CRUD, secondary-index maintenance,
+// operator-aware filter matching, sort/skip/limit/projection and the
+// equality-index planner are all implemented in C (db.c/query.c/db_wasm.c)
+// — this layer only marshals bytes across the WASM bridge, the same way
+// BPlusTree/RTree/TextIndex above do. A database is a root catalog tree
+// (collection name -> backing file name + index list) plus a storage
 // provider that turns file names into sync-handle-shaped objects; that
 // bookkeeping is plain B+ tree key lookups, already fully served by
-// BPlusTree, so it stays here rather than growing new C surface.
+// BPlusTree, so it stays here rather than growing new C surface. Collection
+// only does two bits of real work of its own: the driver-shaped createIndex
+// key-spec validation ({field: 1}, ascending only) and default index naming
+// (team_1, team_1_age_1) — pure conventions, not query/index logic.
 //
 // _id defaulting stays in JS for the same reason ts_ms does for textlog: it
 // needs a clock and randomness, neither of which WASM has a portable source
@@ -2132,14 +2137,52 @@ class Collection {
     return found ? this._readOut(M) : null;
   }
 
-  /** Mirrors the driver's find(): returns a cursor, not a promise. */
-  find(filter = {}) {
+  /**
+   * Mirrors the driver's find(): returns a cursor, not a promise. Accepts
+   * options up front ({ sort, skip, limit, projection }) and/or the
+   * driver's chainable .sort()/.skip()/.limit()/.project() — both set the
+   * same underlying state, so they can be mixed.
+   */
+  find(filter = {}, options = {}) {
     const collection = this;
-    return {
+    const state = {
+      sort: options.sort || null,
+      skip: options.skip || 0,
+      limit: options.limit || 0,
+      projection: options.projection || null
+    };
+    const fcursor = {
+      sort(spec) { state.sort = spec; return fcursor; },
+      skip(n) { state.skip = n; return fcursor; },
+      limit(n) { state.limit = n; return fcursor; },
+      project(spec) { state.projection = spec; return fcursor; },
       async toArray() {
         const M = requireModule();
-        const fbytes = encode(filter);
-        const rc = withBytes(M, fbytes, (p, n) => M._dcw_find(collection._outCtx, collection._collCtx, p, n));
+        const fBytes = encode(filter);
+        const sortBytes = state.sort ? encode(state.sort) : new Uint8Array(0);
+        const projBytes = state.projection ? encode(state.projection) : new Uint8Array(0);
+
+        const fp = fBytes.length ? M._malloc(fBytes.length) : 0;
+        const sp = sortBytes.length ? M._malloc(sortBytes.length) : 0;
+        const pp = projBytes.length ? M._malloc(projBytes.length) : 0;
+        if (fBytes.length) M.HEAPU8.set(fBytes, fp);
+        if (sortBytes.length) M.HEAPU8.set(sortBytes, sp);
+        if (projBytes.length) M.HEAPU8.set(projBytes, pp);
+
+        let rc;
+        try {
+          rc = M._dcw_find(
+            collection._outCtx, collection._collCtx,
+            fp, fBytes.length,
+            sp, sortBytes.length,
+            state.skip, state.limit,
+            pp, projBytes.length
+          );
+        } finally {
+          if (fp) M._free(fp);
+          if (sp) M._free(sp);
+          if (pp) M._free(pp);
+        }
         if (rc !== 0) throw codeError(rc, 'find');
         return collection._readOut(M) ?? [];
       },
@@ -2147,6 +2190,7 @@ class Collection {
         for (const doc of await this.toArray()) yield doc;
       }
     };
+    return fcursor;
   }
 
   async deleteOne(filter = {}) {
