@@ -14,7 +14,8 @@
     "bplustree": "bin/bplustree.js",
     "rtree": "bin/rtree.js",
     "textindex": "bin/textindex.js",
-    "textlog": "bin/textlog.js"
+    "textlog": "bin/textlog.js",
+    "db": "bin/db.js"
   },
   "files": [
     "src",
