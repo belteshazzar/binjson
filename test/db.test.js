@@ -788,6 +788,244 @@ describe('db: update operators (milestone 4)', () => {
   });
 });
 
+describe('db: text index ($text, milestone 6)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  async function seedArticles(posts) {
+    await posts.insertOne({ title: 'Fox story', body: 'The quick brown fox jumps over the lazy dog' });
+    await posts.insertOne({ title: 'Forest run', body: 'A fast fox runs through the forest' });
+    await posts.insertOne({ title: 'Nap time', body: 'The lazy dog sleeps all day' });
+    await posts.insertOne({ title: 'Space', body: 'Completely unrelated content about spacecraft' });
+  }
+
+  it('createIndex({field: "text"}) backfills existing documents', async () => {
+    const db = await openDb();
+    const posts = await db.collection('posts');
+    await seedArticles(posts);
+
+    const name = await posts.createIndex({ body: 'text' });
+    expect(name).toBe('body_text');
+    expect(await posts.listIndexes()).toEqual([{ name: 'body_text', key: { body: 'text' } }]);
+
+    const foxDocs = await posts.find({ $text: { $search: 'fox' } }).toArray();
+    expect(foxDocs.map(d => d.title).sort()).toEqual(['Forest run', 'Fox story']);
+  });
+
+  it('insertOne/deleteOne/updateOne maintain the text index', async () => {
+    const db = await openDb();
+    const posts = await db.collection('posts');
+    await posts.createIndex({ body: 'text' });
+    const { insertedId } = await posts.insertOne({ title: 'Fox story', body: 'a fox in the forest' });
+
+    expect((await posts.find({ $text: { $search: 'fox' } }).toArray()).map(d => d.title)).toEqual(['Fox story']);
+
+    await posts.updateOne({ _id: insertedId }, { $set: { body: 'nothing to see here' } });
+    expect(await posts.find({ $text: { $search: 'fox' } }).toArray()).toEqual([]);
+    expect((await posts.find({ $text: { $search: 'nothing' } }).toArray()).map(d => d.title)).toEqual(['Fox story']);
+
+    await posts.deleteOne({ _id: insertedId });
+    expect(await posts.find({ $text: { $search: 'nothing' } }).toArray()).toEqual([]);
+  });
+
+  it('$text combines with a residual filter', async () => {
+    const db = await openDb();
+    const posts = await db.collection('posts');
+    await posts.createIndex({ body: 'text' });
+    await posts.insertOne({ title: 'Fox story', body: 'a fox in the forest', section: 'nature' });
+    await posts.insertOne({ title: 'Fox news', body: 'a fox spotted downtown', section: 'local' });
+
+    const natureFoxes = await posts.find({ $text: { $search: 'fox' }, section: 'nature' }).toArray();
+    expect(natureFoxes.map(d => d.title)).toEqual(['Fox story']);
+  });
+
+  it('tolerates documents missing the text field or holding a non-string value', async () => {
+    const db = await openDb();
+    const posts = await db.collection('posts');
+    await posts.insertOne({ title: 'No body' });
+    await posts.insertOne({ title: 'Weird body', body: 42 });
+    await posts.insertOne({ title: 'Good body', body: 'a fox runs' });
+
+    // Backfill must not fail even though two of the three documents can't
+    // be text-indexed.
+    await expect(posts.createIndex({ body: 'text' })).resolves.toBe('body_text');
+    expect(await posts.countDocuments()).toBe(3);
+    expect((await posts.find({ $text: { $search: 'fox' } }).toArray()).map(d => d.title)).toEqual(['Good body']);
+  });
+
+  it('rejects a second text index and $text without one', async () => {
+    const db = await openDb();
+    const posts = await db.collection('posts');
+    await posts.createIndex({ body: 'text' });
+    await expect(posts.createIndex({ title: 'text' })).rejects.toThrow();
+
+    const db2 = await openDb();
+    const users = await db2.collection('users');
+    await expect(users.find({ $text: { $search: 'fox' } }).toArray()).rejects.toThrow();
+  });
+
+  it('persists and stays maintained across close/reopen', async () => {
+    const provider = new MemoryStorageProvider();
+    const db1 = await connect(provider);
+    const posts1 = await db1.collection('posts');
+    await posts1.createIndex({ body: 'text' });
+    await posts1.insertOne({ title: 'Fox story', body: 'a fox in the forest' });
+    await db1.close();
+
+    const db2 = await connect(provider);
+    const posts2 = await db2.collection('posts');
+    expect(await posts2.listIndexes()).toEqual([{ name: 'body_text', key: { body: 'text' } }]);
+    expect((await posts2.find({ $text: { $search: 'fox' } }).toArray()).map(d => d.title)).toEqual(['Fox story']);
+
+    await posts2.insertOne({ title: 'Fox news', body: 'another fox sighting' });
+    expect((await posts2.find({ $text: { $search: 'fox' } }).toArray()).map(d => d.title).sort())
+      .toEqual(['Fox news', 'Fox story']);
+    await db2.close();
+  });
+});
+
+describe('db: geo index ($near/$geoWithin, milestone 6)', () => {
+  async function openDb() {
+    return connect(new MemoryStorageProvider());
+  }
+
+  const point = (lng, lat) => ({ type: 'Point', coordinates: [lng, lat] });
+  const LONDON = point(-0.12, 51.5);
+  const PARIS = point(2.35, 48.85);
+  const NEW_YORK = point(-74.0, 40.71);
+  const TOKYO = point(139.69, 35.68);
+
+  async function seedPlaces(places) {
+    await places.insertOne({ name: 'London', location: LONDON });
+    await places.insertOne({ name: 'Paris', location: PARIS });
+    await places.insertOne({ name: 'New York', location: NEW_YORK });
+    await places.insertOne({ name: 'Tokyo', location: TOKYO });
+  }
+
+  it('createIndex({field: "2dsphere"}) backfills existing documents', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await seedPlaces(places);
+
+    const name = await places.createIndex({ location: '2dsphere' });
+    expect(name).toBe('location_2dsphere');
+    expect(await places.listIndexes()).toEqual([{ name: 'location_2dsphere', key: { location: '2dsphere' } }]);
+    await db.close();
+  });
+
+  it('$near returns nearest-first and respects $maxDistance (km)', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await places.createIndex({ location: '2dsphere' });
+    await seedPlaces(places);
+
+    const all = await places.find({ location: { $near: { $geometry: LONDON } } }).toArray();
+    expect(all.map(d => d.name)).toEqual(['London', 'Paris', 'New York', 'Tokyo']);
+
+    const near = await places.find({ location: { $near: { $geometry: LONDON, $maxDistance: 1000 } } }).toArray();
+    expect(near.map(d => d.name)).toEqual(['London', 'Paris']);
+    await db.close();
+  });
+
+  it('$geoWithin $box finds points inside a bounding box', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await places.createIndex({ location: '2dsphere' });
+    await seedPlaces(places);
+
+    const europe = await places.find({
+      location: { $geoWithin: { $box: [[-10, 40], [10, 60]] } }
+    }).toArray();
+    expect(europe.map(d => d.name).sort()).toEqual(['London', 'Paris']);
+    await db.close();
+  });
+
+  it('$geoWithin $center finds points inside a circle (radius in km)', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await places.createIndex({ location: '2dsphere' });
+    await seedPlaces(places);
+
+    const nearLondon = await places.find({
+      location: { $geoWithin: { $center: [[-0.12, 51.5], 500] } }
+    }).toArray();
+    expect(nearLondon.map(d => d.name).sort()).toEqual(['London', 'Paris']);
+    await db.close();
+  });
+
+  it('$near/$geoWithin combine with a residual filter', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await places.createIndex({ location: '2dsphere' });
+    await places.insertOne({ name: 'London', location: LONDON, capital: true });
+    await places.insertOne({ name: 'Manchester', location: point(-2.24, 53.48), capital: false });
+
+    const capitalsNearby = await places.find({
+      location: { $near: { $geometry: LONDON, $maxDistance: 500 } },
+      capital: true
+    }).toArray();
+    expect(capitalsNearby.map(d => d.name)).toEqual(['London']);
+    await db.close();
+  });
+
+  it('insertOne/deleteOne/updateOne maintain the geo index', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await places.createIndex({ location: '2dsphere' });
+    const { insertedId } = await places.insertOne({ name: 'London', location: LONDON });
+
+    expect((await places.find({ location: { $near: { $geometry: LONDON, $maxDistance: 10 } } }).toArray()).map(d => d.name))
+      .toEqual(['London']);
+
+    await places.updateOne({ _id: insertedId }, { $set: { location: TOKYO } });
+    expect(await places.find({ location: { $near: { $geometry: LONDON, $maxDistance: 10 } } }).toArray()).toEqual([]);
+    expect((await places.find({ location: { $near: { $geometry: TOKYO, $maxDistance: 10 } } }).toArray()).map(d => d.name))
+      .toEqual(['London']);
+
+    await places.deleteOne({ _id: insertedId });
+    expect(await places.find({ location: { $near: { $geometry: TOKYO, $maxDistance: 10 } } }).toArray()).toEqual([]);
+    await db.close();
+  });
+
+  it('tolerates a missing geo field but rejects a malformed one', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await places.insertOne({ name: 'No location' });
+    await expect(places.createIndex({ location: '2dsphere' })).resolves.toBe('location_2dsphere');
+
+    await expect(places.insertOne({ name: 'Bad location', location: { type: 'Point', coordinates: [1] } }))
+      .rejects.toThrow();
+    await db.close();
+  });
+
+  it('rejects $near/$geoWithin without a geo index on that field', async () => {
+    const db = await openDb();
+    const places = await db.collection('places');
+    await places.insertOne({ name: 'London', location: LONDON });
+    await expect(places.find({ location: { $near: { $geometry: LONDON } } }).toArray()).rejects.toThrow();
+    await db.close();
+  });
+
+  it('persists and stays maintained across close/reopen', async () => {
+    const provider = new MemoryStorageProvider();
+    const db1 = await connect(provider);
+    const places1 = await db1.collection('places');
+    await places1.createIndex({ location: '2dsphere' });
+    await places1.insertOne({ name: 'London', location: LONDON });
+    await db1.close();
+
+    const db2 = await connect(provider);
+    const places2 = await db2.collection('places');
+    expect(await places2.listIndexes()).toEqual([{ name: 'location_2dsphere', key: { location: '2dsphere' } }]);
+    await places2.insertOne({ name: 'Paris', location: PARIS });
+
+    const europe = await places2.find({ location: { $geoWithin: { $box: [[-10, 40], [10, 60]] } } }).toArray();
+    expect(europe.map(d => d.name).sort()).toEqual(['London', 'Paris']);
+    await db2.close();
+  });
+});
+
 const { hasOPFS } = await bootstrapOPFS();
 
 describe.skipIf(!hasOPFS)('db: OPFS storage provider', () => {

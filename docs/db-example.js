@@ -116,6 +116,34 @@ async function main() {
     await users.dropIndex('team_1');
     console.log();
 
+    console.log('=== text index ($text) ===');
+    const posts = await db.collection('posts');
+    await posts.createIndex({ body: 'text' }); // at most one text index per collection
+    await posts.insertOne({ title: 'Fox story', body: 'a quick fox runs through the forest' });
+    await posts.insertOne({ title: 'Cat nap', body: 'a lazy cat sleeps all day' });
+    const foxPosts = await posts.find({ $text: { $search: 'fox' } }).toArray();
+    console.log('matching "fox":', foxPosts.map(d => d.title));
+    console.log();
+
+    console.log('=== geo index ($near / $geoWithin) ===');
+    const places = await db.collection('places');
+    await places.createIndex({ location: '2dsphere' }); // GeoJSON Point values only
+    const point = (lng, lat) => ({ type: 'Point', coordinates: [lng, lat] });
+    await places.insertOne({ name: 'London', location: point(-0.12, 51.5) });
+    await places.insertOne({ name: 'Paris', location: point(2.35, 48.85) });
+    await places.insertOne({ name: 'Tokyo', location: point(139.69, 35.68) });
+    // $near/$geoWithin distances are in kilometers here (see docs/db-plan.md
+    // milestone 6 for why that deviates from real MongoDB's meters/radians).
+    const nearLondon = await places.find({
+      location: { $near: { $geometry: point(-0.12, 51.5), $maxDistance: 1000 } }
+    }).toArray();
+    console.log('within 1000km of London, nearest first:', nearLondon.map(d => d.name));
+    const europe = await places.find({
+      location: { $geoWithin: { $box: [[-10, 40], [10, 60]] } }
+    }).toArray();
+    console.log('in a European bounding box:', europe.map(d => d.name));
+    console.log();
+
     console.log('=== replaceOne (with upsert) ===');
     await users.replaceOne({ name: 'Ada' }, { name: 'Ada', team: 'core', age: 37 });
     console.log('after replace:', await users.findOne({ name: 'Ada' }));

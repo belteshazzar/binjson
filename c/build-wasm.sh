@@ -86,6 +86,8 @@ ALL_EXPORTS='_malloc,_free,'\
 `# db (document collections, on top of bplustree)`\
 '_dcw_collection_open,_dcw_collection_free,'\
 '_dcw_collection_attach_index,_dcw_collection_add_index,_dcw_collection_remove_index,'\
+'_dcw_collection_attach_text_index,_dcw_collection_add_text_index,'\
+'_dcw_collection_attach_geo_index,_dcw_collection_add_geo_index,'\
 '_dcw_find_by_index,'\
 '_dcw_insert_one,_dcw_find_one,_dcw_find,_dcw_delete_one,_dcw_replace_one,_dcw_count,'\
 '_dcw_update_one,_dcw_update_many,'\

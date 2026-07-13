@@ -1896,6 +1896,12 @@ function indexFileName(collectionName, indexName) {
   return `idx-${collectionName}-${indexName}.bj`;
 }
 
+/** A text index needs the same three files a TextIndex always does. */
+function textIndexFileNames(collectionName, indexName) {
+  const base = `idx-${collectionName}-${indexName}`;
+  return { index: `${base}-terms.bj`, docTerms: `${base}-documents.bj`, docLengths: `${base}-lengths.bj` };
+}
+
 /** Default index name mirroring the real driver's convention: "team_1",
  * "team_1_age_1" for a compound index. Only ascending (1) fields are
  * supported so far — descending order only changes scan direction, which a
@@ -1972,7 +1978,11 @@ class Collection {
     this._order = order;
     this._outCtx = 0;        // per-collection query-output slot in the WASM heap
     this._collCtx = 0;       // dc_collection* coordinating the primary tree + indexes
-    this._indexes = new Map(); // indexName -> { fields, tree, file }
+    // indexName -> one of:
+    //   { kind: 'equality', fields, tree, file }
+    //   { kind: 'text', field, trees: {index,docTerms,docLengths}, files: {...} }
+    //   { kind: 'geo', field, rt, file }
+    this._indexes = new Map();
   }
 
   async _open() {
@@ -1985,25 +1995,67 @@ class Collection {
 
     const entry = this._catalog.search(this.name);
     for (const def of entry.indexes || []) {
-      const handle = await this._provider.openFile(def.file, { create: false });
-      const tree = new BPlusTree(handle, this._order);
-      await tree.open();
-      const n = allocStr(M, def.name);
-      const fieldsBytes = encode(def.fields);
-      let rc;
-      try {
-        rc = withBytes(M, fieldsBytes, (fp, flen) =>
-          M._dcw_collection_attach_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen));
-      } finally {
-        n.free();
+      const kind = def.kind || 'equality'; // pre-milestone-6 catalog entries have no kind
+      if (kind === 'equality') {
+        const handle = await this._provider.openFile(def.file, { create: false });
+        const tree = new BPlusTree(handle, this._order);
+        await tree.open();
+        const n = allocStr(M, def.name);
+        const fieldsBytes = encode(def.fields);
+        let rc;
+        try {
+          rc = withBytes(M, fieldsBytes, (fp, flen) =>
+            M._dcw_collection_attach_index(this._collCtx, n.ptr, n.len, tree.ctx, fp, flen));
+        } finally {
+          n.free();
+        }
+        if (rc !== 0) throw codeError(rc, 'attachIndex');
+        this._indexes.set(def.name, { kind: 'equality', fields: def.fields, tree, file: def.file });
+      } else if (kind === 'text') {
+        const trees = {};
+        for (const role of Object.keys(def.files)) {
+          const handle = await this._provider.openFile(def.files[role], { create: false });
+          trees[role] = new BPlusTree(handle, this._order);
+          await trees[role].open();
+        }
+        const n = allocStr(M, def.name);
+        const f = allocStr(M, def.field);
+        let rc;
+        try {
+          rc = M._dcw_collection_attach_text_index(
+            this._collCtx, n.ptr, n.len,
+            trees.index.ctx, trees.docTerms.ctx, trees.docLengths.ctx,
+            f.ptr, f.len
+          );
+        } finally {
+          n.free(); f.free();
+        }
+        if (rc !== 0) throw codeError(rc, 'attachTextIndex');
+        this._indexes.set(def.name, { kind: 'text', field: def.field, trees, files: def.files });
+      } else {
+        const handle = await this._provider.openFile(def.file, { create: false });
+        const rt = new RTree(handle);
+        await rt.open();
+        const n = allocStr(M, def.name);
+        const f = allocStr(M, def.field);
+        let rc;
+        try {
+          rc = M._dcw_collection_attach_geo_index(this._collCtx, n.ptr, n.len, rt.ctx, f.ptr, f.len);
+        } finally {
+          n.free(); f.free();
+        }
+        if (rc !== 0) throw codeError(rc, 'attachGeoIndex');
+        this._indexes.set(def.name, { kind: 'geo', field: def.field, rt, file: def.file });
       }
-      if (rc !== 0) throw codeError(rc, 'attachIndex');
-      this._indexes.set(def.name, { fields: def.fields, tree, file: def.file });
     }
   }
 
   async _close() {
-    for (const { tree } of this._indexes.values()) await tree.close();
+    for (const ix of this._indexes.values()) {
+      if (ix.kind === 'equality') await ix.tree.close();
+      else if (ix.kind === 'text') { for (const role of Object.keys(ix.trees)) await ix.trees[role].close(); }
+      else await ix.rt.close();
+    }
     this._indexes.clear();
     if (this._collCtx) {
       requireModule()._dcw_collection_free(this._collCtx);
@@ -2026,19 +2078,37 @@ class Collection {
 
   _persistIndexes() {
     const entry = this._catalog.search(this.name);
-    entry.indexes = [...this._indexes.entries()].map(([name, { fields, file }]) => ({ name, fields, file }));
+    entry.indexes = [...this._indexes.entries()].map(([name, ix]) => {
+      if (ix.kind === 'equality') return { name, kind: 'equality', fields: ix.fields, file: ix.file };
+      if (ix.kind === 'text') return { name, kind: 'text', field: ix.field, files: ix.files };
+      return { name, kind: 'geo', field: ix.field, file: ix.file };
+    });
     this._catalog.add(this.name, entry);
   }
 
   /**
-   * Create a secondary index, e.g. createIndex({ team: 1 }) or a compound
-   * createIndex({ team: 1, age: 1 }). Backfills against any existing
-   * documents (all-or-nothing: fails if a document lacks one of the fields
-   * or holds a non-number/string value for one — see keyenc.h). Returns the
-   * index name (options.name, or the driver's default "field_1[_field2_1...]").
+   * Create a secondary index:
+   *   - equality: createIndex({ team: 1 }) or a compound createIndex({ team: 1, age: 1 }).
+   *   - text: createIndex({ body: 'text' }) — single field, BM25-scored via $text.
+   *     At most one text index per collection (matches MongoDB).
+   *   - geo: createIndex({ location: '2dsphere' }) — single field, GeoJSON Point
+   *     values, queried via $near/$geoWithin (see docs/db-plan.md milestone 6).
+   * Backfills against any existing documents — all-or-nothing for equality/geo
+   * indexes (a disqualifying field fails the whole call), but a text index
+   * tolerates documents missing the field or holding a non-string value (they
+   * just aren't text-searchable), matching MongoDB's own behavior for each.
+   * Returns the index name (options.name, or a MongoDB-shaped default).
    */
   async createIndex(keys, options = {}) {
     if (options.unique) throw new Error('createIndex: unique indexes are not yet supported');
+    const keyFields = Object.keys(keys);
+    if (keyFields.length === 1 && keys[keyFields[0]] === 'text') {
+      return this._createTextIndex(keyFields[0], options);
+    }
+    if (keyFields.length === 1 && keys[keyFields[0]] === '2dsphere') {
+      return this._createGeoIndex(keyFields[0], options);
+    }
+
     const fields = checkIndexKeySpec(keys);
     const name = options.name || fields.map(f => `${f}_1`).join('_');
     if (this._indexes.has(name)) throw new Error(`Index already exists: ${name}`);
@@ -2065,7 +2135,74 @@ class Collection {
       throw codeError(rc, 'createIndex');
     }
 
-    this._indexes.set(name, { fields, tree, file: fileName });
+    this._indexes.set(name, { kind: 'equality', fields, tree, file: fileName });
+    this._persistIndexes();
+    return name;
+  }
+
+  async _createTextIndex(field, options = {}) {
+    const name = options.name || `${field}_text`;
+    if (this._indexes.has(name)) throw new Error(`Index already exists: ${name}`);
+
+    const files = textIndexFileNames(this.name, name);
+    const trees = {};
+    for (const role of Object.keys(files)) {
+      await this._provider.deleteFile(files[role]);
+      trees[role] = new BPlusTree(await this._provider.openFile(files[role], { create: true }), this._order);
+      await trees[role].open();
+    }
+
+    const M = requireModule();
+    const n = allocStr(M, name);
+    const f = allocStr(M, field);
+    let rc;
+    try {
+      rc = M._dcw_collection_add_text_index(
+        this._collCtx, n.ptr, n.len,
+        trees.index.ctx, trees.docTerms.ctx, trees.docLengths.ctx,
+        f.ptr, f.len
+      );
+    } finally {
+      n.free(); f.free();
+    }
+
+    if (rc !== 0) {
+      for (const role of Object.keys(files)) await trees[role].close();
+      for (const role of Object.keys(files)) await this._provider.deleteFile(files[role]);
+      throw codeError(rc, 'createIndex');
+    }
+
+    this._indexes.set(name, { kind: 'text', field, trees, files });
+    this._persistIndexes();
+    return name;
+  }
+
+  async _createGeoIndex(field, options = {}) {
+    const name = options.name || `${field}_2dsphere`;
+    if (this._indexes.has(name)) throw new Error(`Index already exists: ${name}`);
+
+    const fileName = indexFileName(this.name, name);
+    await this._provider.deleteFile(fileName);
+    const rt = new RTree(await this._provider.openFile(fileName, { create: true }));
+    await rt.open();
+
+    const M = requireModule();
+    const n = allocStr(M, name);
+    const f = allocStr(M, field);
+    let rc;
+    try {
+      rc = M._dcw_collection_add_geo_index(this._collCtx, n.ptr, n.len, rt.ctx, f.ptr, f.len);
+    } finally {
+      n.free(); f.free();
+    }
+
+    if (rc !== 0) {
+      await rt.close();
+      await this._provider.deleteFile(fileName);
+      throw codeError(rc, 'createIndex');
+    }
+
+    this._indexes.set(name, { kind: 'geo', field, rt, file: fileName });
     this._persistIndexes();
     return name;
   }
@@ -2082,27 +2219,39 @@ class Collection {
       n.free();
     }
     if (rc !== 0) throw codeError(rc, 'dropIndex');
-    await entry.tree.close();
-    await this._provider.deleteFile(entry.file);
+
+    if (entry.kind === 'equality') {
+      await entry.tree.close();
+      await this._provider.deleteFile(entry.file);
+    } else if (entry.kind === 'text') {
+      for (const role of Object.keys(entry.trees)) await entry.trees[role].close();
+      for (const role of Object.keys(entry.files)) await this._provider.deleteFile(entry.files[role]);
+    } else {
+      await entry.rt.close();
+      await this._provider.deleteFile(entry.file);
+    }
     this._indexes.delete(name);
     this._persistIndexes();
   }
 
   async listIndexes() {
-    return [...this._indexes.entries()].map(([name, { fields }]) => ({
-      name,
-      key: Object.fromEntries(fields.map(f => [f, 1]))
-    }));
+    return [...this._indexes.entries()].map(([name, ix]) => {
+      if (ix.kind === 'equality') return { name, key: Object.fromEntries(ix.fields.map(f => [f, 1])) };
+      if (ix.kind === 'text') return { name, key: { [ix.field]: 'text' } };
+      return { name, key: { [ix.field]: '2dsphere' } };
+    });
   }
 
   /**
    * Every document whose indexed fields equal `values` (in the index's
-   * field order), via an O(log n + k) index scan. A low-level primitive —
-   * find()/findOne() don't consult indexes yet (that's the query planner,
-   * a later milestone); this is what it will dispatch equality lookups to.
+   * field order), via an O(log n + k) index scan of an *equality* index —
+   * for $text/$near/$geoWithin, use find()/findOne() with the matching
+   * filter operator instead (db.c dispatches to the right index).
    */
   async findByIndex(name, values) {
-    if (!this._indexes.has(name)) throw new Error(`Index not found: ${name}`);
+    const entry = this._indexes.get(name);
+    if (!entry) throw new Error(`Index not found: ${name}`);
+    if (entry.kind !== 'equality') throw new Error(`findByIndex requires an equality index (got kind: ${entry.kind})`);
     const M = requireModule();
     const n = allocStr(M, name);
     const valuesBytes = encode(values);
@@ -2360,7 +2509,13 @@ class Db {
       this._collections.delete(name);
     }
     this._catalog.delete(name);
-    for (const def of entry.indexes || []) await this._provider.deleteFile(def.file);
+    for (const def of entry.indexes || []) {
+      if (def.kind === 'text') {
+        for (const role of Object.keys(def.files)) await this._provider.deleteFile(def.files[role]);
+      } else {
+        await this._provider.deleteFile(def.file);
+      }
+    }
     await this._provider.deleteFile(entry.file);
     return true;
   }

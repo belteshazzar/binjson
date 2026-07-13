@@ -257,19 +257,101 @@ upsert, in a new `c/update.h`/`c/update.c`, wired into `db.c` alongside
 All C sources, now including `update.c`, continue to compile and link
 cleanly together natively in addition to the Emscripten/WASM build.
 
+### Milestone 6 — `$text` and geospatial operators — ✅ COMPLETE
+
+Reordered ahead of milestone 5 (transactions): text and geo indexes
+introduce the other two backing structures a transaction's journal will
+eventually need to span (`bpt` composite-key trees from milestone 2,
+`TextIndex`'s three trees, `rtree`), so building them first means the
+journal generalization in milestone 5 covers all three index kinds from
+the start instead of needing a follow-up once text/geo indexes showed up.
+
+`dc_index` (db.c) grew a `kind` (`DC_IDX_EQUALITY`/`DC_IDX_TEXT`/
+`DC_IDX_GEO`); a collection may attach a single-field text index (backed by
+an open `TextIndex`'s three trees — `textindex.h`) or a single-field geo
+index (backed by an open `rtree` — `rtree.h`, GeoJSON Point values only:
+`{type:"Point", coordinates:[lng,lat]}`). At most one text index per
+collection (matches MongoDB).
+
+- **`$text: {$search: "..."}`** (top-level, not per-field — matches real
+  MongoDB) requires an attached text index; runs `tix_query`'s BM25 search
+  and resolves the returned doc-id strings back to full documents via the
+  primary tree, preserving relevance rank order (no `sort` option ⇒
+  results come back in that order, since a plain result-array push
+  preserves whatever order candidates were gathered in).
+- **`$near`** (`{field: {$near: {$geometry: {type:"Point",
+  coordinates:[lng,lat]}, $maxDistance: km}}}`) and **`$geoWithin`**
+  (`{field: {$geoWithin: {$box: [[minLng,minLat],[maxLng,maxLat]]}}}` or
+  `{$geoWithin: {$center: [[lng,lat], radiusKm]}}}`) both require an
+  attached geo index on the named field. `$near` always uses
+  `rtree_nearest` (the only rtree query that guarantees sorted output) at
+  `k = rtree_size`, then trims to `$maxDistance` client-side rather than
+  bounding the rtree call itself — guarantees nearest-first order whether
+  or not a distance cap is given. **Deliberate deviations from real
+  MongoDB**, both documented in `db.h`'s top comment: distances are in
+  **kilometers**, not meters/radians (consistency with `rtree.h`'s own
+  km-based API); `$geoWithin` requires an index too (real MongoDB allows an
+  unindexed collection scan) — avoids duplicating point-in-shape math in
+  `query.c` for what's, in practice, an uncommon unindexed-geo-scan case.
+  Legacy `$box`/`$center` syntax was chosen over GeoJSON-`$geometry`+
+  polygon or `$centerSphere`+radians specifically because it sidesteps
+  both the "rtree is point-only, can't do polygons" gap and the
+  radians-vs-km unit mismatch.
+- **Index maintenance asymmetry, both matching real MongoDB behavior**:
+  equality indexes are all-or-nothing (a disqualifying field fails the
+  whole write — milestone 2); a *text* index silently skips a document
+  missing the field or holding a non-string value (not an error — you
+  just can't search for it); a *geo* index silently skips a missing field
+  but *errors* on a present-but-malformed GeoJSON value (like a real
+  2dsphere index's validation).
+- **`resolve_special_source`** (db.c) is a new dispatch step tried
+  *before* the milestone-3 equality planner in `dc_find`/`dc_find_one`/
+  `dc_count`/`dc_update_many`: it recognizes at most one `$text`/`$near`/
+  `$geoWithin` clause at the filter's *top level* only (not nested under
+  `$and`/`$or`/`$nor` — falls through to a full scan there, where
+  `query.c` correctly rejects `$near`/`$geoWithin` as unrecognized
+  operators rather than silently ignoring them), resolves it via the
+  matching index, and builds a *residual filter* (the original filter
+  minus that one clause) to re-apply to each candidate — same
+  "candidate-set-plus-full-filter-reapplication" pattern the equality
+  planner already established, so correctness never depends on which
+  source was used.
+- Two small pieces of duplication were consolidated while wiring this in:
+  `append_index`/`backfill_index` helpers now back all three
+  `dc_collection_add_*_index` functions (previously only the equality path
+  had this logic, inline); `ids_to_docs` resolves both text (hex-string
+  doc ids) and geo (raw OID field) result sets back to documents through
+  one shared function.
+- A real bug caught by this refactor, not a pre-existing one: the
+  milestone-2 equality planner (`plan_equality_index`) never filtered by
+  index kind, so a text/geo index (whose `field_count` is always 0) would
+  have looked "fully pinned" by zero fields and been incorrectly selected
+  as an equality plan the moment any text/geo index existed. Fixed before
+  it could matter (no such index existed yet when it was introduced).
+- `Collection.createIndex({field: 'text'})` / `createIndex({field:
+  '2dsphere'})` in `src/binjson-wasm.js` dispatch to `_createTextIndex`/
+  `_createGeoIndex`; catalog entries grew a `kind` (defaulting to
+  `'equality'` for entries written before this milestone) and per-kind
+  file bookkeeping (`file` for equality/geo, `files: {index, docTerms,
+  docLengths}` for text). No JS query-side changes were needed at all —
+  `find`/`findOne`/`updateMany` already delegate to the C functions that
+  gained `$text`/`$near`/`$geoWithin` support, and the CLI/example scripts
+  needed no code changes either (arbitrary filter JSON already passes
+  through unchanged).
+- `test/db.test.js` — 15 new tests (text index backfill/maintenance/
+  residual-filter/tolerant-of-bad-fields/one-per-collection/persistence;
+  geo index backfill/`$near` with and without `$maxDistance`/`$box`/
+  `$center`/residual-filter/maintenance/tolerant-missing-but-strict-
+  malformed/requires-an-index/persistence).
+
 ### Milestone 5 — Transactions — not started
 
-Cross-document/cross-collection atomicity. Generalize `textindex.c`'s
-journal pattern (`tix_recover`, `bpt_rewind`, see
-`docs/textindex-atomicity.md`) from "3 fixed trees" to "N collection + index
-files touched by one logical operation."
-
-### Milestone 6 — `$text` and geospatial operators — not started
-
-Wire `textindex`'s BM25 query behind `$text`, and `rtree`'s bbox/radius/
-nearest behind `$near`/`$geoWithin`. Known gap: `rtree` is point-only, so
-`$geoIntersects` and polygon `$geoWithin` aren't covered without extending
-it to GeoJSON geometries.
+Cross-document/cross-collection atomicity, now spanning all three index
+kinds (equality `bpt` trees, `TextIndex`'s three trees, `rtree`) since
+milestone 6 was pulled forward. Generalize `textindex.c`'s journal pattern
+(`tix_recover`, `bpt_rewind`, see `docs/textindex-atomicity.md`) from "3
+fixed trees" to "N collection + index files (of any kind) touched by one
+logical operation."
 
 ### Milestone 7 — Aggregation pipeline — not started
 

@@ -56,6 +56,22 @@ db mydb find users '{"$or":[{"team":"core"},{"team":"kernel"}]}'
 nested fields. See `docs/db-plan.md` (milestone 3) for the exact matching
 rules and current limitations.
 
+`$text` (requires a `'text'` index, `create-index posts '{"body":"text"}'`)
+and `$near`/`$geoWithin` (require a `'2dsphere'` index, GeoJSON Point values
+only) are also supported — see `docs/db-plan.md` (milestone 6):
+
+```sh
+db mydb create-index posts '{"body":"text"}'
+db mydb find posts '{"$text":{"$search":"fox"}}'
+
+db mydb create-index places '{"location":"2dsphere"}'
+db mydb find places '{"location":{"$near":{"$geometry":{"type":"Point","coordinates":[-0.12,51.5]},"$maxDistance":1000}}}'
+db mydb find places '{"location":{"$geoWithin":{"$box":[[-10,40],[10,60]]}}}'
+```
+
+Note: `$near`/`$geoWithin` distances here are in **kilometers**, not the
+meters/radians real MongoDB uses for the equivalent operators.
+
 `ObjectId` and `Date` values use MongoDB's Extended JSON literals:
 
 ```sh
