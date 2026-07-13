@@ -2,7 +2,8 @@
 
 A command-line tool for the document database (`src/db.js`): create
 collections and indexes, and insert/find/update/delete documents, all from
-the shell.
+the shell. See `docs/db-api.md` for the complete JS API this wraps
+(every query operator, update operator, and index option).
 
 ```
 db <name> <command> [args] [options]
@@ -27,38 +28,46 @@ and per index.
 | `collections` | List collection names (default) |
 | `drop-collection <coll>` | Drop a collection and its indexes |
 | `insert <coll> <doc>` | Insert one document |
+| `insert-many <coll> <docs>` | Insert an array of documents |
 | `find <coll> [filter]` | Find matching documents (`{}` if omitted) |
 | `find-one <coll> [filter]` | Find the first matching document |
 | `count <coll> [filter]` | Count matching documents |
+| `distinct <coll> <field> [filter]` | Unique values of `field` across matching documents |
 | `delete-one <coll> [filter]` | Delete the first matching document |
+| `delete-many <coll> [filter]` | Delete every matching document |
 | `replace-one <coll> <filter> <doc>` | Replace the first matching document |
 | `update-one <coll> <filter> <update>` | Apply update operators to the first matching document |
 | `update-many <coll> <filter> <update>` | Apply update operators to every matching document |
+| `find-one-and-update <coll> <filter> <update>` | Atomically update and return a document |
+| `find-one-and-replace <coll> <filter> <doc>` | Atomically replace and return a document |
+| `find-one-and-delete <coll> [filter]` | Atomically delete and return a document |
+| `bulk-write <coll> <operations>` | Mixed insert/update/delete operations in one call |
+| `watch <coll>` | Stream change events (insert/update/replace/delete) until Ctrl+C |
 | `create-index <coll> <keys>` | Create an index, e.g. `'{"team":1}'` |
 | `drop-index <coll> <indexName>` | Drop an index |
 | `list-indexes <coll>` | List a collection's indexes |
 | `find-by-index <coll> <indexName> <values>` | Equality lookup via an index |
+| `prune-expired <coll>` | Delete every document past a TTL index's cutoff |
 
 Aliases: `collections` also accepts `list`.
 
-## Documents, filters, and query operators
+## Documents, filters, and operators
 
-`<doc>`/`<filter>`/`<keys>`/`<values>` are JSON. Filters support the query
-engine's operators as plain JSON keys:
+`<doc>`/`<filter>`/`<keys>`/`<values>`/`<docs>`/`<operations>` are all JSON.
+Filters support the full query engine (comparison/logical/array operators,
+`$text`, `$near`/`$geoWithin`, `$regex`, etc.) and update documents support
+the full update-operator set (`$set`, `$inc`, `$rename`, `$addToSet`,
+`$push` with `$each`/`$slice`/`$sort`/`$position`, `$bit`, ...) — see
+`docs/db-api.md` for the exact list and every operator's rules/limitations.
 
 ```sh
 db mydb find users '{"age":{"$gte":18,"$lt":65}}'
 db mydb find users '{"$or":[{"team":"core"},{"team":"kernel"}]}'
+db mydb update-one users '{"name":"Ada"}' '{"$set":{"team":"core"},"$inc":{"visits":1}}'
 ```
 
-`$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$exists`, `$not`,
-`$and`, `$or`, `$nor` are supported; dotted paths (`"address.city"`) resolve
-nested fields. See `docs/db-plan.md` (milestone 3) for the exact matching
-rules and current limitations.
-
-`$text` (requires a `'text'` index, `create-index posts '{"body":"text"}'`)
-and `$near`/`$geoWithin` (require a `'2dsphere'` index, GeoJSON Point values
-only) are also supported — see `docs/db-plan.md` (milestone 6):
+`$text` (requires a `'text'` index) and `$near`/`$geoWithin` (require a
+`'2dsphere'` index, GeoJSON Point values only):
 
 ```sh
 db mydb create-index posts '{"body":"text"}'
@@ -82,19 +91,29 @@ db mydb insert events '{"name":"launch","at":{"$date":"2026-01-01T00:00:00Z"}}'
 A bare hex string does **not** match an `ObjectId` field — same as the real
 MongoDB driver, `_id` and `ObjectId` values are a distinct type from strings.
 
-## Update operators
+`update-one`/`update-many`/`find-one-and-update` reject a plain replacement
+document — use `replace-one`/`find-one-and-replace` for that.
 
-`<update>` for `update-one`/`update-many` is an object of `$set`/`$unset`/
-`$inc`/`$push`/`$pull` operators — a plain replacement document is rejected,
-use `replace-one` for that:
+## Watching for changes
 
 ```sh
-db mydb update-one users '{"name":"Ada"}' '{"$set":{"team":"core"},"$inc":{"visits":1}}'
-db mydb update-many users '{"team":"core"}' '{"$push":{"tags":"reviewed"}}'
+db mydb watch notes
+# Watching notes for changes... (Ctrl+C to stop)
 ```
 
-See `docs/db-plan.md` (milestone 4) for the exact rules and current
-limitations (top-level fields only, no dotted update paths yet).
+Streams every insert/update/replace/delete on the collection as it happens
+(no filtering yet), one JSON-ish line per change, until you press Ctrl+C.
+See `docs/db-api.md`'s "Change streams" section for the event shape and
+cost model.
+
+**This can only ever see writes made by this same `db watch` process.**
+Unlike a browser tab using `connectShared` (`src/db-coordinator.js`), this
+CLI opens the database with a plain, exclusive `connect()` — a *second*
+`db` invocation against the same database while `watch` is running will
+fail outright (the same OPFS exclusive-file-handle conflict `connectShared`
+exists to work around in the browser), not silently miss events. There is
+currently no way to run other `db` commands concurrently against a
+database a `watch` is attached to.
 
 ## Options
 
@@ -104,8 +123,14 @@ limitations (top-level fields only, no dotted update paths yet).
 | `--skip <n>` | `find` | Number of matches to skip (after sort) |
 | `--limit <n>` | `find` | Max matches to return (after skip) |
 | `--project <json>` | `find` | Projection, e.g. `'{"name":1}'` or `'{"age":0}'` |
-| `--upsert` | `replace-one`, `update-one`, `update-many` | Insert if nothing matched |
+| `--upsert` | `replace-one`, `update-one`, `update-many`, `find-one-and-update`, `find-one-and-replace` | Insert if nothing matched |
+| `--return-document <before\|after>` | `find-one-and-update`, `find-one-and-replace` | Which document image to return (default `before`) |
+| `--unordered` | `insert-many`, `bulk-write` | Attempt every operation instead of stopping at the first failure |
 | `--name <name>` | `create-index` | Index name (default: `field_1[_field2_1...]`) |
+| `--unique` | `create-index` | Reject a duplicate value for the indexed field(s) |
+| `--sparse` | `create-index` | Don't index documents missing the field |
+| `--partial-filter <json>` | `create-index` | Only index documents matching this filter |
+| `--ttl <seconds>` | `create-index` | `expireAfterSeconds` — single-field index only |
 | `--order <n>` | any file-creating command | B+ tree order for new files (default 32, min 3) |
 | `-h`, `--help` | | Show help |
 
@@ -113,7 +138,7 @@ limitations (top-level fields only, no dotted update paths yet).
 
 ```sh
 db mydb insert users '{"name":"Ada","team":"core","age":36}'
-db mydb insert users '{"name":"Grace","team":"core","age":85}'
+db mydb insert-many users '[{"name":"Grace","team":"core","age":85},{"name":"Linus","team":"kernel","age":54}]'
 
 db mydb collections
 # 0: users
@@ -122,12 +147,19 @@ db mydb find users '{"team":"core"}' --sort '{"age":-1}'
 # 0: { name: "Grace", team: "core", age: 85, _id: ObjectId(...) }
 # 1: { name: "Ada", team: "core", age: 36, _id: ObjectId(...) }
 
+db mydb distinct users team
+# 0: "core"
+# 1: "kernel"
+
+db mydb create-index users '{"email":1}' --unique --sparse
 db mydb create-index users '{"team":1}'
 db mydb find-by-index users team_1 '["core"]'
 
 db mydb replace-one users '{"name":"Ada"}' '{"name":"Ada","team":"core","age":37}'
 db mydb update-one users '{"name":"Ada"}' '{"$inc":{"age":1}}'
-db mydb delete-one users '{"name":"Grace"}'
+db mydb find-one-and-update users '{"name":"Ada"}' '{"$set":{"onCall":true}}' --return-document after
+db mydb bulk-write users '[{"deleteOne":{"filter":{"name":"Grace"}}},{"updateMany":{"filter":{"team":"kernel"},"update":{"$set":{"onCall":false}}}}]'
+db mydb delete-many users '{"team":"kernel"}'
 db mydb count users
 ```
 

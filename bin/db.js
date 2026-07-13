@@ -31,13 +31,23 @@ Database commands:
 
 Document commands:
   insert <coll> <doc>                    Insert one document
+  insert-many <coll> <docs>              Insert an array of documents
   find <coll> [filter]                   Find matching documents ({} if omitted)
   find-one <coll> [filter]               Find the first matching document
   count <coll> [filter]                  Count matching documents
+  distinct <coll> <field> [filter]       Unique values of a field across matches
   delete-one <coll> [filter]             Delete the first matching document
+  delete-many <coll> [filter]            Delete every matching document
   replace-one <coll> <filter> <doc>      Replace the first matching document
   update-one <coll> <filter> <update>    Apply update operators to the first match
   update-many <coll> <filter> <update>   Apply update operators to every match
+  find-one-and-update <coll> <filter> <update>
+                                          Atomically update and return a document
+  find-one-and-replace <coll> <filter> <doc>
+                                          Atomically replace and return a document
+  find-one-and-delete <coll> [filter]    Atomically delete and return a document
+  bulk-write <coll> <operations>         Mixed insert/update/delete in one call
+  watch <coll>                           Stream change events until Ctrl+C
 
 Index commands:
   create-index <coll> <keys>             e.g. create-index users '{"team":1}'
@@ -45,22 +55,37 @@ Index commands:
   list-indexes <coll>                    List a collection's indexes
   find-by-index <coll> <indexName> <values>
                                           e.g. find-by-index users team_1 '["core"]'
+  prune-expired <coll>                   Delete documents past a TTL index's cutoff
 
-<doc>/<filter>/<keys>/<values> are JSON. Query operators are plain JSON keys
-(e.g. '{"age":{"$gt":30}}'); ObjectId and Date literals use MongoDB Extended
-JSON: {"$oid":"<24 hex chars>"} and {"$date":"<ISO 8601>"}.
+<doc>/<filter>/<keys>/<values>/<docs>/<operations> are JSON. ObjectId and
+Date literals use MongoDB Extended JSON: {"$oid":"<24 hex chars>"} and
+{"$date":"<ISO 8601>"}. The full query-operator, update-operator, and
+bulk-write shapes are documented in docs/db-api.md -- a few examples:
 
-<update> for update-one/update-many is an object of $set/$unset/$inc/$push/
-$pull operators, e.g. '{"$set":{"team":"core"},"$inc":{"visits":1}}'; a
-plain replacement document is rejected -- use replace-one for that.
+  '{"age":{"$gt":30}}'                                query operator
+  '{"$set":{"team":"core"},"$inc":{"visits":1}}'      update operators
+  '[{"insertOne":{"document":{"name":"Ada"}}}]'       bulk-write operation
+
+update-one/update-many/find-one-and-update reject a plain replacement
+document -- use replace-one/find-one-and-replace for that.
 
 Options:
   --sort <json>       find: sort spec, e.g. '{"age":1}' or '{"age":-1}'
   --skip <n>          find: number of matches to skip
   --limit <n>         find: max matches to return
   --project <json>    find: projection spec, e.g. '{"name":1}' or '{"age":0}'
-  --upsert            replace-one/update-one/update-many: insert if nothing matched
+  --upsert            replace-one/update-one/update-many/find-one-and-update/
+                      find-one-and-replace: insert if nothing matched
+  --return-document <before|after>
+                      find-one-and-update/find-one-and-replace: which image
+                      to return (default before)
+  --unordered         insert-many/bulk-write: don't stop at the first failure
   --name <name>       create-index: index name (default: "field_1[_field2_1...]")
+  --unique            create-index: reject a duplicate value
+  --sparse            create-index: don't index documents missing the field
+  --partial-filter <json>
+                      create-index: only index documents matching this filter
+  --ttl <seconds>     create-index: expireAfterSeconds (single-field index only)
   --order <n>         B+ tree order for newly created files (default 32, min 3)
   -h, --help          Show this help`);
   process.exit(1);
@@ -144,6 +169,8 @@ function parseArgs(argv) {
       usage();
     } else if (arg === '--upsert') {
       opts.upsert = true;
+    } else if (arg === '--unordered') {
+      opts.ordered = false;
     } else if (arg === '--sort') {
       opts.sort = parseJson('--sort', argv[++i]);
     } else if (arg === '--project') {
@@ -152,8 +179,23 @@ function parseArgs(argv) {
       opts.skip = Number(argv[++i]);
     } else if (arg === '--limit') {
       opts.limit = Number(argv[++i]);
+    } else if (arg === '--return-document') {
+      const v = argv[++i];
+      if (v !== 'before' && v !== 'after') {
+        console.error('Error: --return-document must be "before" or "after"');
+        process.exit(1);
+      }
+      opts.returnDocument = v;
     } else if (arg === '--name') {
       opts.name = argv[++i];
+    } else if (arg === '--unique') {
+      opts.unique = true;
+    } else if (arg === '--sparse') {
+      opts.sparse = true;
+    } else if (arg === '--partial-filter') {
+      opts.partialFilter = parseJson('--partial-filter', argv[++i]);
+    } else if (arg === '--ttl') {
+      opts.ttl = Number(argv[++i]);
     } else if (arg === '--order') {
       const n = Number(argv[++i]);
       if (!Number.isInteger(n) || n < 3) {
@@ -224,6 +266,19 @@ async function main() {
         break;
       }
 
+      case 'insert-many': {
+        requireArgs(args, 2, 'insert-many requires <coll> and <docs>');
+        const coll = await db.collection(args[0]);
+        const docs = parseJson('<docs>', args[1]);
+        if (!Array.isArray(docs)) {
+          console.error('Error: <docs> must be a JSON array');
+          process.exit(1);
+        }
+        const result = await coll.insertMany(docs, { ordered: opts.ordered !== false });
+        console.log(`Inserted ${result.insertedCount} document(s).`);
+        break;
+      }
+
       case 'find': {
         requireArgs(args, 1, 'find requires <coll>');
         const coll = await db.collection(args[0]);
@@ -260,6 +315,19 @@ async function main() {
         break;
       }
 
+      case 'distinct': {
+        requireArgs(args, 2, 'distinct requires <coll> and <field>');
+        const coll = await db.collection(args[0]);
+        const filter = args[2] ? parseJson('<filter>', args[2]) : {};
+        const values = await coll.distinct(args[1], filter);
+        if (values.length === 0) {
+          console.log('No values found.');
+          break;
+        }
+        values.forEach((v, i) => console.log(`${i}: ${formatValue(v)}`));
+        break;
+      }
+
       case 'delete-one': {
         requireArgs(args, 1, 'delete-one requires <coll>');
         const coll = await db.collection(args[0]);
@@ -271,6 +339,16 @@ async function main() {
           console.log('No document matched; nothing deleted.');
           process.exitCode = 1;
         }
+        break;
+      }
+
+      case 'delete-many': {
+        requireArgs(args, 1, 'delete-many requires <coll>');
+        const coll = await db.collection(args[0]);
+        const filter = args[1] ? parseJson('<filter>', args[1]) : {};
+        const { deletedCount } = await coll.deleteMany(filter);
+        console.log(`Deleted ${deletedCount} document(s).`);
+        if (deletedCount === 0) process.exitCode = 1;
         break;
       }
 
@@ -323,11 +401,102 @@ async function main() {
         break;
       }
 
+      case 'find-one-and-update': {
+        requireArgs(args, 3, 'find-one-and-update requires <coll>, <filter>, and <update>');
+        const coll = await db.collection(args[0]);
+        const filter = parseJson('<filter>', args[1]);
+        const update = parseJson('<update>', args[2]);
+        const doc = await coll.findOneAndUpdate(filter, update, {
+          upsert: !!opts.upsert,
+          returnDocument: opts.returnDocument || 'before'
+        });
+        if (doc === null) {
+          console.log('No document found.');
+          process.exitCode = 1;
+        } else {
+          console.log(formatValue(doc));
+        }
+        break;
+      }
+
+      case 'find-one-and-replace': {
+        requireArgs(args, 3, 'find-one-and-replace requires <coll>, <filter>, and <doc>');
+        const coll = await db.collection(args[0]);
+        const filter = parseJson('<filter>', args[1]);
+        const replacement = parseJson('<doc>', args[2]);
+        const doc = await coll.findOneAndReplace(filter, replacement, {
+          upsert: !!opts.upsert,
+          returnDocument: opts.returnDocument || 'before'
+        });
+        if (doc === null) {
+          console.log('No document found.');
+          process.exitCode = 1;
+        } else {
+          console.log(formatValue(doc));
+        }
+        break;
+      }
+
+      case 'find-one-and-delete': {
+        requireArgs(args, 1, 'find-one-and-delete requires <coll>');
+        const coll = await db.collection(args[0]);
+        const filter = args[1] ? parseJson('<filter>', args[1]) : {};
+        const doc = await coll.findOneAndDelete(filter);
+        if (doc === null) {
+          console.log('No document found.');
+          process.exitCode = 1;
+        } else {
+          console.log(formatValue(doc));
+        }
+        break;
+      }
+
+      case 'bulk-write': {
+        requireArgs(args, 2, 'bulk-write requires <coll> and <operations>');
+        const coll = await db.collection(args[0]);
+        const operations = parseJson('<operations>', args[1]);
+        const result = await coll.bulkWrite(operations, { ordered: opts.ordered !== false });
+        console.log(formatValue(result));
+        break;
+      }
+
+      case 'watch': {
+        requireArgs(args, 1, 'watch requires <coll>');
+        const coll = await db.collection(args[0]);
+        const stream = coll.watch();
+        console.log(`Watching ${args[0]} for changes... (Ctrl+C to stop)`);
+        // A pending ChangeStream promise holds no OS handle (no timer, no
+        // socket, no OPFS sync-access-handle I/O), so nothing otherwise
+        // keeps the event loop alive between changes. process.stdin.resume()
+        // is the usual Node idiom for this but isn't reliable here -- stdin
+        // is /dev/null (already at EOF) for any non-interactive invocation
+        // (cron, CI, a backgrounded process with no controlling terminal),
+        // so an explicit interval is the only deterministic way to hold the
+        // loop open regardless of stdin's state.
+        const keepAlive = setInterval(() => {}, 1 << 30);
+        process.on('SIGINT', async () => {
+          clearInterval(keepAlive);
+          stream.close();
+          await db.close();
+          process.exit(0);
+        });
+        for await (const change of stream) {
+          console.log(formatValue(change));
+        }
+        break;
+      }
+
       case 'create-index': {
         requireArgs(args, 2, 'create-index requires <coll> and <keys>');
         const coll = await db.collection(args[0]);
         const keys = parseJson('<keys>', args[1]);
-        const name = await coll.createIndex(keys, opts.name ? { name: opts.name } : {});
+        const indexOpts = {};
+        if (opts.name) indexOpts.name = opts.name;
+        if (opts.unique) indexOpts.unique = true;
+        if (opts.sparse) indexOpts.sparse = true;
+        if (opts.partialFilter) indexOpts.partialFilterExpression = opts.partialFilter;
+        if (opts.ttl !== undefined) indexOpts.expireAfterSeconds = opts.ttl;
+        const name = await coll.createIndex(keys, indexOpts);
         console.log(`Created index ${name}.`);
         break;
       }
@@ -348,7 +517,7 @@ async function main() {
           console.log('No indexes.');
           break;
         }
-        indexes.forEach((ix, i) => console.log(`${i}: ${ix.name} ${formatValue(ix.key)}`));
+        indexes.forEach((ix, i) => console.log(`${i}: ${formatValue(ix)}`));
         break;
       }
 
@@ -357,6 +526,14 @@ async function main() {
         const coll = await db.collection(args[0]);
         const values = parseJson('<values>', args[2]);
         printDocs(await coll.findByIndex(args[1], values));
+        break;
+      }
+
+      case 'prune-expired': {
+        requireArgs(args, 1, 'prune-expired requires <coll>');
+        const coll = await db.collection(args[0]);
+        const deletedCount = await coll.pruneExpired();
+        console.log(`Pruned ${deletedCount} expired document(s).`);
         break;
       }
 
