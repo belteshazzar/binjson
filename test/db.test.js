@@ -798,6 +798,76 @@ describe('db: query operator completeness (milestone 11)', () => {
       await expect(users.find({ name: { $regex: 'a**' } }).toArray()).rejects.toThrow();
       await db.close();
     });
+
+    // third_party/regex-engine (ECMAScript-flavored) replaced the old
+    // byte-oriented hand-rolled engine -- these exercise capabilities the
+    // old one could never have supported at all, through the real
+    // Collection API (WASM + JS bridge + C engine together, not just the
+    // C-level integration on its own).
+    it('lookahead and lookbehind, unsupported by the old engine, now work', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([{ name: 'price: 42' }, { name: '$42' }, { name: 'no digits here' }]);
+
+      expect((await users.find({ name: { $regex: '(?<!\\$)\\d{2}' } }).toArray()).map((d) => d.name))
+        .toEqual(['price: 42']); // the $42 case is correctly excluded by the negative lookbehind
+
+      expect((await users.find({ name: { $regex: '(?=.*\\d)price' } }).toArray()).map((d) => d.name))
+        .toEqual(['price: 42']); // lookahead: "price" only when the string also contains a digit somewhere
+      await db.close();
+    });
+
+    it('named groups compile and match (capture text is irrelevant to $regex\'s boolean result)', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([{ name: '2026-07' }, { name: 'not-a-date' }]);
+      expect((await users.find({ name: { $regex: '^(?<year>\\d{4})-(?<month>\\d{2})$' } }).toArray()).map((d) => d.name))
+        .toEqual(['2026-07']);
+      await db.close();
+    });
+
+    it('matches a multi-byte UTF-8 character as one character, not one byte at a time', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([{ name: 'café' }, { name: 'cafe' }]);
+      // '.' must consume exactly the one trailing character in each case --
+      // the old byte-oriented engine would have needed a different pattern
+      // length for the multi-byte 'é' than for the single-byte 'e'.
+      expect((await users.find({ name: { $regex: '^caf.$' } }).toArray()).map((d) => d.name).sort())
+        .toEqual(['cafe', 'café']);
+      await db.close();
+    });
+
+    it('matches an astral codepoint (needs a UTF-16 surrogate pair internally)', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      await users.insertMany([{ name: 'hello 😀 world' }, { name: 'hello world' }]);
+      expect((await users.find({ name: { $regex: '😀' } }).toArray()).map((d) => d.name))
+        .toEqual(['hello 😀 world']);
+      await db.close();
+    });
+
+    // A compiled Program is a ~2MB fixed-size struct (regex.c's own doc
+    // comment), and $regex is evaluated once per candidate per document --
+    // without the compile cache, scanning even a modest collection would
+    // mean allocating/compiling megabytes *per document*. This doesn't
+    // assert a strict latency budget (avoiding flakiness on a slow CI
+    // runner), just that 2000 documents complete in a timeframe only
+    // possible if the pattern was compiled once and reused, not
+    // recompiled per document.
+    it('a $regex scan over 2000 documents completes fast, proving the compile cache is doing its job', async () => {
+      const db = await openDb();
+      const users = await db.collection('users');
+      for (let i = 0; i < 2000; i++) await users.insertOne({ name: `user-${i}` });
+
+      const start = performance.now();
+      const matches = await users.find({ name: { $regex: '^user-1\\d{2}$' } }).toArray();
+      const elapsedMs = performance.now() - start;
+
+      expect(matches).toHaveLength(100); // user-100..user-199
+      expect(elapsedMs).toBeLessThan(2000); // generous; uncached recompilation would take vastly longer than this
+      await db.close();
+    });
   });
 });
 

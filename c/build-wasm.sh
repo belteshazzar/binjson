@@ -19,6 +19,7 @@ mkdir -p lib
 COMMON_FLAGS=(
   -O3
   -flto
+  -Ithird_party/regex-engine/include
   -sMODULARIZE=1
   -sEXPORT_ES6=1
   -sALLOW_MEMORY_GROWTH=1
@@ -98,6 +99,14 @@ ALL_EXPORTS='_malloc,_free,'\
 
 # Every C source, each listed once. c/test_binjson.c is a native test harness
 # with its own main() and is deliberately excluded.
+#
+# third_party/regex-engine's two sources are regex.c's actual engine (see
+# regex.c's own top comment for why it's a thin adapter over them, not a
+# replacement written from scratch) -- not exported to JS themselves
+# (EXPORTED_FUNCTIONS below has no _regex_* entries), reachable only via
+# regex.c's rx_match, which is reachable via db_query.c from the exported
+# _dcw_* entry points, so normal reachability-based dead-code elimination
+# keeps them without needing to be listed as roots.
 ALL_SOURCES=(
   c/binjson.c c/binjson_wasm.c
   c/bjfile.c c/hostio.c
@@ -106,6 +115,7 @@ ALL_SOURCES=(
   c/diff.c c/textlog.c c/textlog_wasm.c
   c/stemmer.c c/textindex.c c/textindex_wasm.c
   c/db_keyenc.c c/regex.c c/db_query.c c/db_update.c c/db.c c/db_wasm.c
+  third_party/regex-engine/src/regexp.c third_party/regex-engine/src/regex_wasm.c
 )
 
 build_module binjson createBinjsonModule "$ALL_EXPORTS" "${ALL_SOURCES[@]}"
