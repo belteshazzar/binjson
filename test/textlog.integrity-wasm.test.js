@@ -79,7 +79,7 @@ describe.skipIf(!hasOPFS)('WASM TextLog integrity and cache', () => {
     // Fixture: 6 versions at dps 3 — v1 and v5 are snapshots, so corrupting
     // v1's text poisons the v1–v4 chain while v5+ stays verifiable.
     const file = name();
-    writeFixture(await sync(file, true), 'textlog-v6-dps3.bin');
+    await writeFixture(await sync(file, true), 'textlog-v6-dps3.bin');
     {
       const h = await sync(file);
       const buf = new Uint8Array(h.getSize());
@@ -93,7 +93,7 @@ describe.skipIf(!hasOPFS)('WASM TextLog integrity and cache', () => {
       buf[at] ^= 0x01;                    // 'L' -> 'M', structure intact
       h.write(buf, { at: 0 });
       h.flush();
-      h.close();
+      await h.close();
     }
 
     const log = new TextLog(await sync(file), 3);
@@ -146,7 +146,7 @@ describe.skipIf(!hasOPFS)('WASM TextLog integrity and cache', () => {
       'no trailing newline here'
     ];
     const file = name();
-    writeFixture(await sync(file, true), 'textlog-v6-dps3.bin');
+    await writeFixture(await sync(file, true), 'textlog-v6-dps3.bin');
 
     const log = new TextLog(await sync(file), 3);
     await log.open();

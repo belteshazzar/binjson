@@ -130,7 +130,7 @@ describe.skipIf(!hasOPFS)('WASM TextIndex BM25 scoring', () => {
       const filename = `${name}-legacy-${suffix}.bj`;
       if (!files.includes(filename)) files.push(filename);
       const fh = await getFileHandle(root, filename, { create: true });
-      writeFixture(await fh.createSyncAccessHandle(), `ti-bm25-25-${suffix}.bin`);
+      await writeFixture(await fh.createSyncAccessHandle(), `ti-bm25-25-${suffix}.bin`);
     }
     const native = await makeIndex(`${name}-native`);
     for (let i = 0; i < 25; i++) {

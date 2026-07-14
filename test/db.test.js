@@ -99,6 +99,45 @@ describe('db: catalog + collection primitives', () => {
     await db.close();
   });
 
+  it('findOne projection includes or excludes fields, with _id defaulting to included', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    const { insertedId } = await users.insertOne({ name: 'Ada', team: 'core', age: 36 });
+
+    const included = await users.findOne({ _id: insertedId }, { projection: { name: 1 } });
+    expect(included).toEqual({ _id: insertedId, name: 'Ada' });
+
+    const excluded = await users.findOne({ _id: insertedId }, { projection: { age: 0 } });
+    expect(excluded).toEqual({ _id: insertedId, name: 'Ada', team: 'core' });
+
+    const noId = await users.findOne({ _id: insertedId }, { projection: { name: 1, _id: 0 } });
+    expect(noId).toEqual({ name: 'Ada' });
+
+    // No projection given -- unchanged, full document (existing behavior).
+    expect(await users.findOne({ _id: insertedId })).toEqual({ _id: insertedId, name: 'Ada', team: 'core', age: 36 });
+
+    // A non-matching filter still returns null, projection or not.
+    expect(await users.findOne({ name: 'Nobody' }, { projection: { name: 1 } })).toBeNull();
+    await db.close();
+  });
+
+  it('findOne projection applies on the $near/equality-index/full-scan paths alike', async () => {
+    const db = await openDb();
+    const users = await db.collection('users');
+    await users.createIndex({ team: 1 });
+    await users.insertOne({ name: 'Ada', team: 'core', age: 36 });
+    await users.insertOne({ name: 'Grace', team: 'kernel', age: 40 });
+
+    // Equality-index-planned path (team is indexed).
+    const viaIndex = await users.findOne({ team: 'core' }, { projection: { name: 1 } });
+    expect(viaIndex).toEqual({ _id: viaIndex._id, name: 'Ada' });
+
+    // Full-scan path (age is not indexed).
+    const viaScan = await users.findOne({ age: 40 }, { projection: { name: 1 } });
+    expect(viaScan).toEqual({ _id: viaScan._id, name: 'Grace' });
+    await db.close();
+  });
+
   it('matches nested-document and array fields by exact value equality', async () => {
     const db = await openDb();
     const users = await db.collection('users');

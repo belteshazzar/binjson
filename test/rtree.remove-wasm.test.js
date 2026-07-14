@@ -114,7 +114,7 @@ describe.skipIf(!hasOPFS)('WASM R-tree located removal', () => {
     // no childBBoxes, so pruning falls back to child loads but must stay
     // correct.
     const file = name();
-    writeFixture(await sync(file, true), 'rtree-o4-150.bin');
+    await writeFixture(await sync(file, true), 'rtree-o4-150.bin');
 
     const t = new RTree(await sync(file), 4);
     await t.open();

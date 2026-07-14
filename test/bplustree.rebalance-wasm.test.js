@@ -143,7 +143,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree delete rebalancing', () => {
     const file = name();
     // Frozen legacy fixture: the removed JS reference never rebalanced, so
     // add 0..119 / delete 20..99 left chains of empty leaves in the file.
-    writeFixture(await sync(file, true), 'bpt-o4-hollow.bin');
+    await writeFixture(await sync(file, true), 'bpt-o4-hollow.bin');
 
     const tree = new BPlusTree(await sync(file), 4);
     await tree.open();

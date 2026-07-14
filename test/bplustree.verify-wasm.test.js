@@ -53,7 +53,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree verify', () => {
       at += rec.byteLength;
     }
     handle.flush();
-    handle.close();
+    await handle.close();
     return offsets;
   }
 
@@ -116,7 +116,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree verify', () => {
   it('accepts under-filled legacy JS-written files', async () => {
     const file = name();
     // Frozen legacy fixture: add 0..119, delete 20..99 — empty leaves remain.
-    writeFixture(await sync(file, true), 'bpt-o4-hollow.bin');
+    await writeFixture(await sync(file, true), 'bpt-o4-hollow.bin');
 
     const tree = await openCrafted(file);
     expect(tree.verify()).toBe(true);

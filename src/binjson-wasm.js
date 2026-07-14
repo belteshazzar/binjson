@@ -406,6 +406,11 @@ function readU32(M, addr) {
   return (b[addr] | (b[addr + 1] << 8) | (b[addr + 2] << 16) | (b[addr + 3] * 0x1000000)) >>> 0;
 }
 
+/** Little-endian signed i32 read from the heap -- for out-params carrying a BJ_ERR_* code (can be negative). */
+function readI32(M, addr) {
+  return readU32(M, addr) | 0;
+}
+
 /** Copy a JS string into the heap as UTF-8; returns { ptr, len }. */
 function writeBytes(M, str) {
   const bytes = encoder.encode(str);
@@ -571,6 +576,7 @@ class BPlusTree {
       this.ctx = M._bptw_open(this._fd);
       if (!this.ctx) {
         unregisterHandle(M, this._fd);
+        await this.syncAccessHandle.close(); // isOpen never becomes true, so this.close() can't reach it -- must release it here
         throw new Error('Invalid tree file');
       }
       this.order = M._bptw_order(this.ctx);
@@ -578,6 +584,7 @@ class BPlusTree {
       this.ctx = M._bptw_create(this._fd, this.order);
       if (!this.ctx) {
         unregisterHandle(M, this._fd);
+        await this.syncAccessHandle.close();
         throw new Error('Failed to create B+ tree');
       }
     }
@@ -961,6 +968,7 @@ class RTree {
       this.ctx = M._rtw_open(this._fd);
       if (!this.ctx) {
         unregisterHandle(M, this._fd);
+        await this.syncAccessHandle.close(); // isOpen never becomes true, so this.close() can't reach it -- must release it here
         throw new Error('Invalid R-tree file');
       }
       this.maxEntries = M._rtw_max_entries(this.ctx);
@@ -968,6 +976,7 @@ class RTree {
       this.ctx = M._rtw_create(this._fd, this.maxEntries);
       if (!this.ctx) {
         unregisterHandle(M, this._fd);
+        await this.syncAccessHandle.close();
         throw new Error('Failed to create R-tree');
       }
     }
@@ -1247,6 +1256,7 @@ class TextLog {
       this.ctx = M._tlw_open(this._fd);
       if (!this.ctx) {
         unregisterHandle(M, this._fd);
+        await this.syncAccessHandle.close(); // isOpen never becomes true, so this.close() can't reach it -- must release it here
         throw new Error('Failed to read metadata: no valid metadata found');
       }
       this.diffsPerSnapshot = M._tlw_diffs_per_snapshot(this.ctx);
@@ -1255,6 +1265,7 @@ class TextLog {
       this.ctx = M._tlw_create_at(this._fd, this.diffsPerSnapshot, this.baseVersion);
       if (!this.ctx) {
         unregisterHandle(M, this._fd);
+        await this.syncAccessHandle.close();
         throw new Error('Failed to create TextLog');
       }
     }
@@ -2092,6 +2103,7 @@ class Collection {
     this._journal = null;    // sync access handle for the cross-file commit journal
     this._journalFd = -1;
     this._watchers = new Set(); // open ChangeStreams (see watch())
+    this._openCursors = new Set(); // open find() cursors holding a live WASM-side dc_cursor (see find())
   }
 
   /**
@@ -2223,6 +2235,7 @@ class Collection {
 
   async _close() {
     for (const stream of [...this._watchers]) stream.close();
+    for (const fcursor of [...this._openCursors]) await fcursor.close();
     await this._closeIndexes();
     if (this._journalFd >= 0) {
       unregisterHandle(requireModule(), this._journalFd);
@@ -2525,10 +2538,24 @@ class Collection {
     return { acknowledged: true, insertedCount, insertedIds };
   }
 
-  async findOne(filter = {}) {
+  /** `options.projection` follows the same inclusion-XOR-exclusion rules as find()'s (`_id` defaults included). */
+  async findOne(filter = {}, options = {}) {
     const M = requireModule();
     const fbytes = encode(filter);
-    const found = withBytes(M, fbytes, (p, n) => M._dcw_find_one(this._outCtx, this._collCtx, p, n));
+    const projBytes = options.projection ? encode(options.projection) : new Uint8Array(0);
+
+    const fp = fbytes.length ? M._malloc(fbytes.length) : 0;
+    const pp = projBytes.length ? M._malloc(projBytes.length) : 0;
+    if (fbytes.length) M.HEAPU8.set(fbytes, fp);
+    if (projBytes.length) M.HEAPU8.set(projBytes, pp);
+
+    let found;
+    try {
+      found = M._dcw_find_one(this._outCtx, this._collCtx, fp, fbytes.length, pp, projBytes.length);
+    } finally {
+      if (fp) M._free(fp);
+      if (pp) M._free(pp);
+    }
     if (found < 0) throw codeError(found, 'findOne');
     return found ? this._readOut(M) : null;
   }
@@ -2552,6 +2579,13 @@ class Collection {
    * driver's chainable .sort()/.skip()/.limit()/.project() — both set the
    * same underlying state, so they can be mixed.
    */
+  /**
+   * Sorted queries fall back to the eager path below (dcw_find,
+   * materializing every match before returning) since an arbitrary
+   * in-memory sort fundamentally needs every match before it can emit the
+   * first ordered result. An unsorted find() streams instead, in bounded
+   * batches, via the WASM-side dc_cursor -- see db.h's comment on it.
+   */
   find(filter = {}, options = {}) {
     const collection = this;
     const state = {
@@ -2560,45 +2594,144 @@ class Collection {
       limit: options.limit || 0,
       projection: options.projection || null
     };
+    const BATCH = 100;
+
+    async function eagerToArray() {
+      const M = requireModule();
+      const fBytes = encode(filter);
+      const sortBytes = state.sort ? encode(state.sort) : new Uint8Array(0);
+      const projBytes = state.projection ? encode(state.projection) : new Uint8Array(0);
+
+      const fp = fBytes.length ? M._malloc(fBytes.length) : 0;
+      const sp = sortBytes.length ? M._malloc(sortBytes.length) : 0;
+      const pp = projBytes.length ? M._malloc(projBytes.length) : 0;
+      if (fBytes.length) M.HEAPU8.set(fBytes, fp);
+      if (sortBytes.length) M.HEAPU8.set(sortBytes, sp);
+      if (projBytes.length) M.HEAPU8.set(projBytes, pp);
+
+      let rc;
+      try {
+        rc = M._dcw_find(
+          collection._outCtx, collection._collCtx,
+          fp, fBytes.length,
+          sp, sortBytes.length,
+          state.skip, state.limit,
+          pp, projBytes.length
+        );
+      } finally {
+        if (fp) M._free(fp);
+        if (sp) M._free(sp);
+        if (pp) M._free(pp);
+      }
+      if (rc !== 0) throw codeError(rc, 'find');
+      return collection._readOut(M) ?? [];
+    }
+
+    let wasmCursor = 0; // dc_cursor*, once opened
+    let exhausted = false;
+    let pending = []; // docs fetched but not yet handed out
+    let pendingIdx = 0;
+
+    function openWasmCursor() {
+      const M = requireModule();
+      const fBytes = encode(filter);
+      const projBytes = state.projection ? encode(state.projection) : new Uint8Array(0);
+      const fp = fBytes.length ? M._malloc(fBytes.length) : 0;
+      const pp = projBytes.length ? M._malloc(projBytes.length) : 0;
+      const errP = M._malloc(4);
+      if (fBytes.length) M.HEAPU8.set(fBytes, fp);
+      if (projBytes.length) M.HEAPU8.set(projBytes, pp);
+      let ptr;
+      try {
+        ptr = M._dcw_cursor_open(
+          collection._collCtx,
+          fp, fBytes.length,
+          state.skip, state.limit,
+          pp, projBytes.length,
+          errP
+        );
+        if (!ptr) throw codeError(readI32(M, errP), 'find');
+      } finally {
+        if (fp) M._free(fp);
+        if (pp) M._free(pp);
+        M._free(errP);
+      }
+      wasmCursor = ptr;
+      collection._openCursors.add(fcursor);
+    }
+
+    function closeWasmCursor() {
+      if (wasmCursor) {
+        requireModule()._dcw_cursor_close(wasmCursor);
+        wasmCursor = 0;
+        collection._openCursors.delete(fcursor);
+      }
+    }
+
+    async function fetchBatch(maxCount) {
+      const M = requireModule();
+      if (!wasmCursor) openWasmCursor();
+      const doneP = M._malloc(4);
+      let rc, done;
+      try {
+        rc = M._dcw_cursor_next_batch(collection._outCtx, wasmCursor, maxCount, doneP);
+        if (rc !== 0) throw codeError(rc, 'find');
+        done = !!readU32(M, doneP);
+      } finally {
+        M._free(doneP);
+      }
+      const batch = collection._readOut(M) ?? [];
+      if (done) { exhausted = true; closeWasmCursor(); }
+      return batch;
+    }
+
     const fcursor = {
       sort(spec) { state.sort = spec; return fcursor; },
       skip(n) { state.skip = n; return fcursor; },
       limit(n) { state.limit = n; return fcursor; },
       project(spec) { state.projection = spec; return fcursor; },
+
       async toArray() {
-        const M = requireModule();
-        const fBytes = encode(filter);
-        const sortBytes = state.sort ? encode(state.sort) : new Uint8Array(0);
-        const projBytes = state.projection ? encode(state.projection) : new Uint8Array(0);
-
-        const fp = fBytes.length ? M._malloc(fBytes.length) : 0;
-        const sp = sortBytes.length ? M._malloc(sortBytes.length) : 0;
-        const pp = projBytes.length ? M._malloc(projBytes.length) : 0;
-        if (fBytes.length) M.HEAPU8.set(fBytes, fp);
-        if (sortBytes.length) M.HEAPU8.set(sortBytes, sp);
-        if (projBytes.length) M.HEAPU8.set(projBytes, pp);
-
-        let rc;
-        try {
-          rc = M._dcw_find(
-            collection._outCtx, collection._collCtx,
-            fp, fBytes.length,
-            sp, sortBytes.length,
-            state.skip, state.limit,
-            pp, projBytes.length
-          );
-        } finally {
-          if (fp) M._free(fp);
-          if (sp) M._free(sp);
-          if (pp) M._free(pp);
-        }
-        if (rc !== 0) throw codeError(rc, 'find');
-        return collection._readOut(M) ?? [];
+        if (state.sort) return eagerToArray();
+        const all = pending.slice(pendingIdx);
+        pendingIdx = pending.length;
+        while (!exhausted) all.push(...(await fetchBatch(BATCH)));
+        return all;
       },
-      async *[Symbol.asyncIterator]() {
-        for (const doc of await this.toArray()) yield doc;
+
+      /** Manual pull, `{ value, done }` -- same shape as ChangeStream's. Sorted cursors don't support this: call toArray() instead. */
+      async next() {
+        if (state.sort) throw new Error('find().next() is not supported with .sort() -- use toArray() or for-await instead');
+        if (pendingIdx >= pending.length) {
+          if (exhausted) return { value: undefined, done: true };
+          pending = await fetchBatch(BATCH);
+          pendingIdx = 0;
+          if (pending.length === 0) return { value: undefined, done: true };
+        }
+        return { value: pending[pendingIdx++], done: false };
+      },
+
+      [Symbol.asyncIterator]() {
+        return state.sort ? eagerIterator() : fcursor;
+      },
+
+      /** Releases the underlying WASM cursor if one is open. Safe to call more than once, or on an already-exhausted/sorted cursor. */
+      async close() {
+        exhausted = true;
+        closeWasmCursor();
+      },
+
+      /** Invoked by `for await` on early exit (break/throw) -- releases the WASM cursor instead of leaking it. */
+      async return() {
+        await fcursor.close();
+        return { value: undefined, done: true };
       }
     };
+
+    async function* eagerIterator() {
+      for (const doc of await eagerToArray()) yield doc;
+    }
+
     return fcursor;
   }
 

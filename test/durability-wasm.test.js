@@ -292,7 +292,7 @@ describe.skipIf(!hasOPFS)('WASM durability & crash recovery', () => {
       handle.write(leaf, { at: rootOff });
       handle.write(meta, { at: rootOff + leaf.byteLength });
       handle.flush();
-      handle.close();
+      await handle.close();
 
       // WASM reopens the mixed file: the JS-written tail commit carries no
       // trailer and is accepted as a legacy commit; mutations keep working.
@@ -309,7 +309,7 @@ describe.skipIf(!hasOPFS)('WASM durability & crash recovery', () => {
     it('WASM opens a JS-written tree (no header, no trailers)', async () => {
       const file = name();
       // Frozen fixture: order 4, one add('legacy', { from: 'js' }).
-      writeFixture(await sync(file, true), 'bpt-o4-legacy1.bin');
+      await writeFixture(await sync(file, true), 'bpt-o4-legacy1.bin');
 
       const tree = new BPlusTree(await sync(file), 4);
       await tree.open();

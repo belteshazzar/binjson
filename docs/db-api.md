@@ -81,6 +81,7 @@ await users.insertMany([{ name: 'Grace' }, { name: 'Linus' }], { ordered: true }
 
 ```js
 const doc = await users.findOne({ team: 'core' });        // one document or null
+const thin = await users.findOne({ team: 'core' }, { projection: { name: 1 } });
 
 const cursor = users.find({ team: 'core' })
   .sort({ age: -1 })       // { field: 1 | -1, ... }, compound sorts allowed
@@ -92,7 +93,7 @@ const docs = await cursor.toArray();
 for await (const doc of users.find({ team: 'core' })) { /* ... */ }
 ```
 
-- `findOne(filter = {})` — first match or `null`.
+- `findOne(filter = {}, options = {})` — first match or `null`. `options.projection` follows the same inclusion-XOR-exclusion rules as `find()`'s (`_id` defaults included).
 - `find(filter = {}, options = {})` — returns a lazy cursor (not a
   promise). `options` can set `sort`/`skip`/`limit`/`projection` up front,
   or use the chainable `.sort()`/`.skip()`/`.limit()`/`.project()` —

@@ -49,7 +49,7 @@ describe.skipIf(!hasOPFS)('WASM hostile files', () => {
       at += rec.byteLength;
     }
     handle.flush();
-    handle.close();
+    await handle.close();
     return at;
   }
 
@@ -90,8 +90,11 @@ describe.skipIf(!hasOPFS)('WASM hostile files', () => {
     await expect(async () => tree.delete(5)).rejects.toThrow();
     await expect(collect(tree.iterate())).rejects.toThrow();
 
-    // Failed mutations must roll back cleanly: nothing appended.
-    expect(await fileSize(file)).toBe(size);
+    // Failed mutations must roll back cleanly: nothing appended. Read
+    // through tree's own still-open handle rather than fileSize()'s fresh
+    // one -- node-opfs now enforces OPFS's real single-writer-per-file
+    // constraint on the same still-open file.
+    expect(tree.syncAccessHandle.getSize()).toBe(size);
     await tree.close();
   });
 
@@ -118,7 +121,7 @@ describe.skipIf(!hasOPFS)('WASM hostile files', () => {
     await expect(async () => tree.insert(1, 2, oid())).rejects.toThrow();
     await expect(async () => tree.remove(oid())).rejects.toThrow();
 
-    expect(await fileSize(file)).toBe(size);
+    expect(tree.syncAccessHandle.getSize()).toBe(size);
     await tree.close();
   });
 
@@ -187,14 +190,6 @@ describe.skipIf(!hasOPFS)('WASM hostile files', () => {
     expect((await collect(tree.iterate(Infinity)))).toEqual([]);
     await tree.close();
   });
-
-  async function fileSize(filename) {
-    const fh = await getFileHandle(root, filename, { create: false });
-    const h = await fh.createSyncAccessHandle();
-    const n = h.getSize();
-    h.close();
-    return n;
-  }
 
   async function collect(iter) {
     const out = [];

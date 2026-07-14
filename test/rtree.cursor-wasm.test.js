@@ -193,7 +193,7 @@ describe.skipIf(!hasOPFS)('WASM R-tree spatial cursor and kNN', () => {
     const file = name();
     // Frozen fixture: order 9, points pt(0..199) — written by the removed
     // pure-JS implementation (no childBBoxes).
-    writeFixture(await sync(file, true), 'rtree-o9-200.bin');
+    await writeFixture(await sync(file, true), 'rtree-o9-200.bin');
 
     const tree = new RTree(await sync(file), 9);
     await tree.open();

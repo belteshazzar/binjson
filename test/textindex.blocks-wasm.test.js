@@ -60,7 +60,7 @@ describe.skipIf(!hasOPFS)('WASM TextIndex block-partitioned postings', () => {
     const fh = await getFileHandle(root, filename, { create: false });
     const h = await fh.createSyncAccessHandle();
     const n = h.getSize();
-    h.close();
+    await h.close();
     return n;
   }
 
@@ -94,7 +94,7 @@ describe.skipIf(!hasOPFS)('WASM TextIndex block-partitioned postings', () => {
       const filename = `${name}-${suffix}.bj`;
       files.push(filename);
       const fh = await getFileHandle(root, filename, { create: true });
-      writeFixture(await fh.createSyncAccessHandle(), `ti-blocks-60-${suffix}.bin`);
+      await writeFixture(await fh.createSyncAccessHandle(), `ti-blocks-60-${suffix}.bin`);
     }
 
     // Same files, WASM implementation: legacy blobs are read directly.

@@ -129,7 +129,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree bulk-load compaction', () => {
         if (at >= 0) k7 = value.values[at];
       }
     }
-    handle.close();
+    await handle.close();
     expect(metas).toBe(1);
     expect(leafKeys.length).toBe(50);
     expect(k7).toEqual({ n: 7 });

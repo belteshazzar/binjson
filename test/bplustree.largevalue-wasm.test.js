@@ -81,7 +81,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree out-of-line large values', () => {
         value.keys.forEach((k, i) => byKey.set(k, value.values[i]));
       }
     }
-    handle.close();
+    await handle.close();
     return byKey;
   }
 
@@ -197,15 +197,16 @@ describe.skipIf(!hasOPFS)('WASM B+ tree out-of-line large values', () => {
     await tree.open();
     for (let i = 0; i < 100; i++) tree.add(i, big(`c${i}-`, 900));
     for (let i = 0; i < 60; i++) tree.delete(i);   // churn: abandoned history
-    const srcHandle = await sync(src);
-    const beforeSize = srcHandle.getSize();
-    srcHandle.close();
+    // tree still has src open at this point -- read the size through its own
+    // handle rather than opening a second one (node-opfs now enforces OPFS's
+    // real single-writer-per-file constraint on the same still-open file).
+    const beforeSize = tree.syncAccessHandle.getSize();
     await tree.compact(await sync(dst, true));
     await tree.close();
 
     const dstHandle = await sync(dst);
     const afterSize = dstHandle.getSize();
-    dstHandle.close();
+    await dstHandle.close();
     expect(afterSize).toBeLessThan(beforeSize);
 
     const packed = new BPlusTree(await sync(dst), 8);
@@ -241,7 +242,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree out-of-line large values', () => {
     }
     expect(markerPointer).toBeDefined();
     expect(bjFile.read(markerPointer)).toEqual(big('payload', 900));
-    handle.close();
+    await handle.close();
 
     // High-level API never exposes the marker.
     const reopened = new BPlusTree(await sync(file), 4);

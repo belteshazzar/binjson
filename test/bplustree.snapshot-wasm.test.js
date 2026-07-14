@@ -152,7 +152,7 @@ describe.skipIf(!hasOPFS)('WASM B+ tree snapshots', () => {
   it('works on JS-written legacy files', async () => {
     const file = name();
     // Frozen legacy fixture: order-4 JS tree with keys 0..7 (`v${i}`).
-    writeFixture(await sync(file, true), 'bpt-o4-seq8.bin');
+    await writeFixture(await sync(file, true), 'bpt-o4-seq8.bin');
 
     const tree = await openTree(file);
     const bounds = tree.boundaries();

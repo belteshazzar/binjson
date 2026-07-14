@@ -96,7 +96,7 @@ describe.skipIf(!hasOPFS)('WASM R-tree child bounding boxes', () => {
   it('upgrades legacy (JS-written) trees on write and stays correct', async () => {
     const file = name();
     // Frozen fixture: order 9, points pt(0..299), no childBBoxes.
-    writeFixture(await sync(file, true), 'rtree-o9-300.bin');
+    await writeFixture(await sync(file, true), 'rtree-o9-300.bin');
 
     const proxy = counting(await sync(file));
     const t = new RTree(proxy, 9);
@@ -147,7 +147,7 @@ describe.skipIf(!hasOPFS)('WASM R-tree child bounding boxes', () => {
         lastMeta = value;
       }
     }
-    handle.close();
+    await handle.close();
     expect(internalWithBoxes).toBeGreaterThan(0);
     expect(leafEntries).toBeGreaterThanOrEqual(120);   // append-only history
     expect(lastMeta.size).toBe(120);
@@ -179,7 +179,7 @@ describe.skipIf(!hasOPFS)('WASM R-tree child bounding boxes', () => {
     const src = name();
     const dst = name();
     // Frozen fixture: order 9, points pt(0..149), no childBBoxes.
-    writeFixture(await sync(src, true), 'rtree-o9-150.bin');
+    await writeFixture(await sync(src, true), 'rtree-o9-150.bin');
 
     const t = new RTree(await sync(src), 9);
     await t.open();

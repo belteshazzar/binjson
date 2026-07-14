@@ -65,7 +65,7 @@ describe.skipIf(!hasOPFS)('WASM TextIndex cross-tree atomicity', () => {
     const h = await fh.createSyncAccessHandle();
     const buf = new Uint8Array(h.getSize());
     h.read(buf, { at: 0 });
-    h.close();
+    await h.close();
     return buf;
   }
   async function writeBytes(filename, buf) {
@@ -74,7 +74,7 @@ describe.skipIf(!hasOPFS)('WASM TextIndex cross-tree atomicity', () => {
     h.truncate(0);
     h.write(buf, { at: 0 });
     h.flush();
-    h.close();
+    await h.close();
     return buf;
   }
   async function snapshot(name) {

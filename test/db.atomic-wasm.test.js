@@ -86,7 +86,7 @@ describe.skipIf(!hasOPFS)('WASM db: cross-file write atomicity', () => {
     const h = await fh.createSyncAccessHandle();
     const buf = new Uint8Array(h.getSize());
     h.read(buf, { at: 0 });
-    h.close();
+    await h.close();
     return buf;
   }
   async function writeBytes(filename, buf) {
@@ -95,7 +95,7 @@ describe.skipIf(!hasOPFS)('WASM db: cross-file write atomicity', () => {
     h.truncate(0);
     h.write(buf, { at: 0 });
     h.flush();
-    h.close();
+    await h.close();
   }
   async function snapshot(names) {
     const out = {};
@@ -293,14 +293,17 @@ describe.skipIf(!hasOPFS)('WASM db: cross-file write atomicity', () => {
       await coll0.insertOne(doc);
       docs.push(doc);
     }
-    const jBefore = await readBytes(`coll-${name}-journal.bj`);
-    expect(jBefore.byteLength).toBeGreaterThan(0);
+    // Read the size through coll0's own already-open journal handle rather
+    // than readBytes' fresh one -- coll0 hasn't closed it yet at this point,
+    // and node-opfs now enforces OPFS's real single-writer-per-file
+    // constraint (previously unenforced, silently allowing a second handle
+    // on the same still-open file).
+    expect(coll0._journal.getSize()).toBeGreaterThan(0);
 
     // Structural change: journal must reset (index count is about to change).
     await coll0.createIndex({ body: 'text' }, { name: 'textIdx' });
     trackFiles(name, ['teamIdx', 'textIdx']);
-    const jAfter = await readBytes(`coll-${name}-journal.bj`);
-    expect(jAfter.byteLength).toBe(0);
+    expect(coll0._journal.getSize()).toBe(0);
     await db0.close();
 
     // An empty journal imposes no constraint (rolling back the very first
